@@ -344,7 +344,7 @@ fn hwmon_fan_percent(want: &str) -> f32 {
                 Some(v) => v,
                 None => continue,
             };
-            let max = read_u64(dir.join(format!("{stem}_max"))).unwrap_or_else(|| {
+            let max = read_u64(dir.join(format!("{stem}_max"))).unwrap_or({
                 if current > 2200 {
                     3000 // AIO pumps are usually 3000 RPM
                 } else if current > 1500 {

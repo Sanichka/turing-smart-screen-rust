@@ -47,7 +47,7 @@ fn single_instance_guard() -> Result<InstanceGuard, String> {
         use std::fs::OpenOptions;
         // Exclusive create: fails when the lock file already exists.
         match OpenOptions::new().write(true).create_new(true).open(".tss-daemon.lock") {
-            Ok(f) => Ok(InstanceGuard::File(f)),
+            Ok(f) => Ok(InstanceGuard::File { _file: f }),
             Err(_) => Err("another daemon instance is already running".to_string()),
         }
     }
@@ -57,7 +57,7 @@ enum InstanceGuard {
     #[cfg(target_os = "windows")]
     Windows(isize),
     #[cfg(not(target_os = "windows"))]
-    File(std::fs::File),
+    File { _file: std::fs::File },
 }
 
 #[cfg(target_os = "windows")]
