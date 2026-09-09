@@ -10,7 +10,7 @@ config:
   # Theme to use (located in res/themes)
   # Use the name of the folder as value
   # Choose a theme made for your screen size (see DISPLAY_SIZE inside theme.yaml)
-  THEME: 3.5inchTheme2
+  THEME: 5inchTheme2
 
   # Hardware sensors reading
   # Choose the appropriate method for reading your hardware sensors:
@@ -24,7 +24,7 @@ config:
   # Linux/MacOS interfaces are named "eth0", "wlan0", "wlp1s0", "enp2s0"...
   # For Windows use the interfaces pretty name: "Ethernet 2", "Wi-Fi", ...
   # Leave the fields empty if the card does not exist on your setup
-  ETH: "" # Ethernet Card
+  ETH: "Ethernet" # Ethernet Card
   WLO: "" # Wi-Fi Card
 
   # CPU fan
@@ -41,6 +41,7 @@ config:
 
   # OpenWeatherMap API KEY. Can be obtained by creating a free account on https://home.openweathermap.org/users/sign_up.
   # You need to subscribe to the 3.0 OneCallAPI that has 1000 free daily calls
+  # (env var TSS_WEATHER_API_KEY overrides this value when set)
   WEATHER_API_KEY: ""
   # Location from which to display the weather. Use for example https://www.latlong.net/ to get latitude/longitude
   WEATHER_LATITUDE: 45.75

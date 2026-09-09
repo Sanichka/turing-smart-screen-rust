@@ -1,0 +1,42 @@
+[package]
+name = "turing-smart-screen-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust system monitor for Turing/XuanFang USB displays (port of turing-smart-screen-python)"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "turing-smart-screen"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+log = "0.4"
+# No default features: drops the `multithread` (rayon) pool — ~29 idle
+# threads and ~1MB. Single-threaded refresh is plenty at 1Hz polling.
+sysinfo = { version = "0.32", default-features = false, features = ["component", "disk", "network", "system", "user"] }
+nvml-wrapper = "0.11"
+# minreq over ureq: no url/idna/icu chain; `https` uses native-tls (OS
+# TLS: SChannel on Windows) instead of bundling rustls+webpki-roots twice.
+minreq = { version = "2", default-features = false, features = ["https", "json-using-serde"] }
+chrono = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"
+serialport = "4"
+ctrlc = "3.4"
+
+# Tray icon is Windows-only in this build (tray-item has no feature-free
+# Linux backend); other platforms log once and run headless.
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-item = "0.10"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
