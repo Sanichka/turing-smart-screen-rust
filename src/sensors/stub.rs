@@ -58,6 +58,8 @@ pub fn static_snapshot() -> Snapshot {
         wx_description: Some("Cloudy".to_string()),
         wx_humidity: Some("45%".to_string()),
         wx_update: Some("@15:33".to_string()),
+        // Overlaid by `Provider` from a fresh bank (see snapshot_fast).
+        custom: Vec::new(),
     }
 }
 
@@ -133,5 +135,7 @@ pub fn random_snapshot(rng: &mut XorShift64) -> Snapshot {
         wx_description: Some("Cloudy".to_string()),
         wx_humidity: Some("45%".to_string()),
         wx_update: Some("@15:33".to_string()),
+        // Overlaid by `Provider` from a fresh bank (see snapshot_fast).
+        custom: Vec::new(),
     }
 }

@@ -8,6 +8,7 @@
 pub mod port;
 pub mod rev_a;
 pub mod simu;
+pub mod simuserve;
 
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::JoinHandle;
@@ -77,6 +78,8 @@ pub enum DisplayOp {
         y1: i32,
         data: Vec<u8>,
     },
+    ScreenOff,
+    ScreenOn,
     /// Drain marker: the dispatcher processes all queued regions first,
     /// then turns the panel off and exits. Sending `Stop` on the bounded
     /// channel therefore doubles as the graceful-drain barrier.
@@ -96,6 +99,16 @@ pub fn spawn_dispatcher(
                     DisplayOp::Region { x0, y0, x1, y1, data } => {
                         if let Err(e) = driver.send_region(x0, y0, x1, y1, &data) {
                             log::error!("send_region failed: {e}");
+                        }
+                    }
+                    DisplayOp::ScreenOff => {
+                        if let Err(e) = driver.screen_off() {
+                            log::error!("screen_off failed: {e}");
+                        }
+                    }
+                    DisplayOp::ScreenOn => {
+                        if let Err(e) = driver.screen_on() {
+                            log::error!("screen_on failed: {e}");
                         }
                     }
                     DisplayOp::Stop => {

@@ -173,6 +173,12 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     }
     // Tray icon (best effort, kept alive until shutdown).
     let _tray = crate::tray::show(stopping.clone());
+    // Simulated display web preview (Python parity: always on in SIMU).
+    let simu_web = if cfg.display.revision == crate::config::Revision::Simu {
+        display::simuserve::spawn(stopping.clone())
+    } else {
+        None
+    };
     let slow_shared = Arc::new(Mutex::new(slow));
     let ping_iv = stats_interval(theme, &["PING"]);
     let wx_iv = {
@@ -217,14 +223,50 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     };
 
     let mut last_sent = renderer.fb.pixels().to_vec();
+    let (power_tx, power_rx) = std::sync::mpsc::sync_channel::<crate::power::PowerEvent>(8);
+    // Not joined at shutdown: the message loop has no quit source and the
+    // process exit reaps it (same as Python's daemon threads).
+    let _power_thread = crate::power::spawn(power_tx);
+    let mut force_full = false;
     log::info!("entering render loop ({:?} tick)", args.tick);
     while !stopping.load(Ordering::SeqCst) {
         let t0 = Instant::now();
+        // OS power/session events (suspend blanks, resume repaints).
+        while let Ok(ev) = power_rx.try_recv() {
+            match ev {
+                crate::power::PowerEvent::Suspend => {
+                    log::info!("system suspending: panel off");
+                    let _ = tx.send(DisplayOp::ScreenOff);
+                }
+                crate::power::PowerEvent::Resume => {
+                    log::info!("system resumed: panel on + full repaint");
+                    let _ = tx.send(DisplayOp::ScreenOn);
+                    force_full = true;
+                }
+                crate::power::PowerEvent::Shutdown => {
+                    log::info!("session ending: stopping");
+                    stopping.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        if stopping.load(Ordering::SeqCst) {
+            break;
+        }
         let mut snap = provider.snapshot_fast(&nets);
         sensors::apply_slow(&mut snap, &slow_shared.lock().unwrap());
         renderer.draw_snapshot(theme, &imgs, &snap);
         renderer.dirty.clear(); // authoritative source is the tile diff
-        let tiles = renderer.fb.changed_tiles(&last_sent, TILE_W, TILE_H);
+        let tiles = if force_full {
+            force_full = false;
+            vec![crate::render::framebuf::Rect::new(
+                0,
+                0,
+                renderer.fb.w as i32,
+                renderer.fb.h as i32,
+            )]
+        } else {
+            renderer.fb.changed_tiles(&last_sent, TILE_W, TILE_H)
+        };
         if !tiles.is_empty() {
             log::debug!("{} changed tiles", tiles.len());
         }
@@ -257,6 +299,9 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     }
     drop(tx);
     let _ = io.join();
+    if let Some(h) = simu_web {
+        let _ = h.join();
+    }
     log::info!("clean stop");
     0
 }

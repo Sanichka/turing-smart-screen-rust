@@ -22,6 +22,7 @@ struct Args {
     render_once: bool,
     daemon: bool,
     send_test: bool,
+    theme_screenshots: Option<u32>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -42,6 +43,15 @@ fn parse_args() -> Result<Args, String> {
             "--render-once" => args.render_once = true,
             "--daemon" => args.daemon = true,
             "--send-test" => args.send_test = true,
+            "--theme-screenshots" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "missing value for --theme-screenshots".to_string())?;
+                args.theme_screenshots = Some(
+                    v.parse()
+                        .map_err(|_| "invalid --theme-screenshots (iteration count)".to_string())?,
+                );
+            }
             "--com" => {
                 args.com_override = Some(
                     it.next()
@@ -102,13 +112,15 @@ fn print_help() {
            turing-smart-screen --render-once [--config <path>] [--theme <name>]\n  \
            turing-smart-screen --daemon [--config <path>] [--theme <name>] [--com <port>] [--tick-ms <n>]\n  \
            turing-smart-screen --send-test [--config <path>] [--theme <name>] [--com <port>]\n  \
+           turing-smart-screen --theme-screenshots <n> [--config <path>] [--theme <name>]\n  \
            turing-smart-screen --help\n\
          \n\
          --dump-config   load config.yaml + theme and print resolved display params\n\
          --sensors-once  take one sensor snapshot and print it as JSON\n\
          --render-once   render one frame to screencap.png (SIMU parity)\n\
          --daemon        run the monitor loop (Ctrl-C stops, panel blanks)\n\
-         --send-test     init display + paint one frame, leave panel on"
+         --send-test     init display + paint one frame, leave panel on\n\
+         --theme-screenshots <n>  run n headless iterations, save screencap.png (CI/theme previews)"
     );
 }
 
@@ -128,8 +140,9 @@ pub fn run() {
         && !args.render_once
         && !args.daemon
         && !args.send_test
+        && args.theme_screenshots.is_none()
     {
-        eprintln!("pass --dump-config, --sensors-once, --render-once, --daemon or --send-test (see --help).");
+        eprintln!("pass --dump-config, --sensors-once, --render-once, --daemon, --send-test or --theme-screenshots (see --help).");
         std::process::exit(2);
     }
 
@@ -156,8 +169,8 @@ pub fn run() {
         return;
     }
 
-    if !args.dump_config && !args.render_once && !args.daemon && !args.send_test {
-        eprintln!("pass --dump-config, --render-once, --daemon or --send-test (see --help).");
+    if !args.dump_config && !args.render_once && !args.daemon && !args.send_test && args.theme_screenshots.is_none() {
+        eprintln!("pass --dump-config, --render-once, --daemon, --send-test or --theme-screenshots (see --help).");
         std::process::exit(2);
     }
     let theme_name = args
@@ -193,6 +206,11 @@ pub fn run() {
 
     if args.render_once {
         render_once(&cfg, &theme);
+        return;
+    }
+
+    if let Some(n) = args.theme_screenshots {
+        theme_screenshots(&cfg, &theme, n);
         return;
     }
 
@@ -235,6 +253,33 @@ pub fn run() {
             println!("stats_sections: {}", keys.join(", "));
         }
     }
+}
+
+/// Batch mode for theme previews/CI: run `n` headless iterations with the
+/// configured provider, overwriting `screencap.png` each time (mirrors
+/// `main.py --theme-screenshots`, minus hardware).
+fn theme_screenshots(cfg: &crate::config::AppConfig, theme: &crate::config::Theme, n: u32) {
+    use crate::render::{ImageCache, Renderer};
+
+    let nets = NetSelection {
+        eth: cfg.general.eth.clone(),
+        wlo: cfg.general.wlo.clone(),
+    };
+    let slow = SlowCtx::from_config(&cfg.general);
+    let mut provider = Provider::from_hw(cfg.general.hw_sensors, &cfg.general.cpu_fan);
+    let mut r = Renderer::new(theme.width, theme.height, PathBuf::from("res/fonts"));
+    let imgs = ImageCache::preload(theme);
+    r.draw_static(theme, &imgs);
+    for i in 0..n {
+        log::debug!("screenshot iteration #{i}");
+        let snap = provider.snapshot(&nets, &slow);
+        r.draw_snapshot(theme, &imgs, &snap);
+        if let Err(e) = r.fb.save_png("screencap.png") {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+    println!("wrote screencap.png after {n} iteration(s)");
 }
 
 /// Single-frame render to `screencap.png` (parity with `REVISION: SIMU`).

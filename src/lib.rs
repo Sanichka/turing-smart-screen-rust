@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod display;
 pub mod logger;
+pub mod power;
 pub mod render;
 pub mod sensors;
 pub mod tray;

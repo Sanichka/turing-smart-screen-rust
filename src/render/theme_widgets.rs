@@ -470,7 +470,8 @@ pub fn fmt_date(epoch_secs: i64, format: &str) -> String {
         "short" => dt.format("%-m/%-d/%y").to_string(),
         "long" => dt.format("%B %-d, %Y").to_string(),
         "full" => dt.format("%A, %B %-d, %Y").to_string(),
-        _ => dt.format("%b %-d, %Y").to_string(), // medium + default
+        "medium" => dt.format("%b %-d, %Y").to_string(),
+        custom => dt.format(&babel_to_chrono(custom)).to_string(),
     }
 }
 
@@ -481,6 +482,104 @@ pub fn fmt_time(epoch_secs: i64, format: &str) -> String {
     match format {
         "short" => dt.format("%-I:%M %p").to_string(),
         "long" | "full" => dt.format("%-I:%M:%S %p %Z").to_string(),
-        _ => dt.format("%-I:%M:%S %p").to_string(), // medium + default
+        "medium" => dt.format("%-I:%M:%S %p").to_string(),
+        custom => dt.format(&babel_to_chrono(custom)).to_string(),
+    }
+}
+
+/// Translate a babel/ICU date pattern (e.g. `"yyyy.MM.dd"`,
+/// `"HH:mm:ss zzz"`, `"MM/dd/yyyy"`) to a chrono format string.
+/// Unknown tokens pass through literally; named formats are handled by
+/// the callers above and never reach here.
+pub fn babel_to_chrono(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut it = pattern.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\'' {
+            // Quoted literal: '' = literal apostrophe.
+            if it.peek() == Some(&'\'') {
+                it.next();
+                out.push('\'');
+            } else {
+                for q in it.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    out.push(q);
+                }
+            }
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            out.push(c);
+            continue;
+        }
+        // Count run length of the same field symbol.
+        let mut n = 1;
+        while it.peek() == Some(&c) {
+            it.next();
+            n += 1;
+        }
+        out.push_str(match (c, n) {
+            ('y', 1) => "%Y",
+            ('y', 2) => "%y",
+            ('y', _) => "%Y",
+            ('M', 1) => "%-m",
+            ('M', 2) => "%m",
+            ('M', 3) => "%b",
+            _ if c == 'M' => "%B",
+            ('d', 1) => "%-d",
+            _ if c == 'd' => "%d",
+            ('E', 1..=3) => "%a",
+            _ if c == 'E' => "%A",
+            ('H', 1) => "%-H",
+            _ if c == 'H' => "%H",
+            ('h', 1) => "%-I",
+            _ if c == 'h' => "%I",
+            ('m', 1) => "%-M",
+            _ if c == 'm' => "%M",
+            ('s', 1) => "%-S",
+            _ if c == 's' => "%S",
+            ('a', _) => "%p",
+            ('z', _) | ('Z', _) | ('v', _) | ('V', _) => "%Z",
+            _ => {
+                // Unknown field: emit literally (chrono prints unknown
+                // %-codes through rather than failing).
+                for _ in 0..n {
+                    out.push(c);
+                }
+                continue;
+            }
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn babel_patterns() {
+        assert_eq!(babel_to_chrono("yyyy.MM.dd"), "%Y.%m.%d");
+        assert_eq!(babel_to_chrono("HH:mm:ss zzz"), "%H:%M:%S %Z");
+        assert_eq!(babel_to_chrono("MM/dd/yyyy"), "%m/%d/%Y");
+        assert_eq!(babel_to_chrono("h:mm a"), "%-I:%M %p");
+        assert_eq!(babel_to_chrono("EEEE, d MMMM y"), "%A, %-d %B %Y");
+        assert_eq!(babel_to_chrono("'at' HH:mm"), "at %H:%M");
+    }
+
+    #[test]
+    fn named_formats_stable() {
+        let epoch = 1708457333; // 2024-02-20 18:48:53 UTC
+        assert!(!fmt_date(epoch, "short").is_empty());
+        assert!(fmt_date(epoch, "full").contains("2024"));
+        assert!(!fmt_time(epoch, "medium").is_empty());
+        let expect = chrono::DateTime::from_timestamp(epoch, 0)
+            .map(|u| u.with_timezone(&chrono::Local))
+            .unwrap()
+            .format("%Y.%m.%d")
+            .to_string();
+        assert_eq!(fmt_date(epoch, "yyyy.MM.dd"), expect);
     }
 }

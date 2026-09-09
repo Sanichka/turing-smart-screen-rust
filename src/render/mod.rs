@@ -241,7 +241,7 @@ impl Renderer {
         self.net(path(stats, &["NET"]), theme, imgs, snap);
         self.date(path(stats, &["DATE"]), theme, imgs, snap);
         self.uptime(path(stats, &["UPTIME"]), theme, imgs, snap);
-        self.custom(path(stats, &["CUSTOM"]));
+        self.custom(path(stats, &["CUSTOM"]), theme, imgs, snap);
         self.weather(path(stats, &["WEATHER"]), theme, imgs, snap);
         self.ping(path(stats, &["PING"]), theme, imgs, snap);
     }
@@ -791,13 +791,55 @@ impl Renderer {
         }
     }
 
-    fn custom(&mut self, node: Option<&Value>) {
+    /// Custom plugin sensors (ports `stats.Custom`). Theme `CUSTOM` keys
+    /// name a registered `CustomDataSource`; unknown names warn once each.
+    fn custom(&mut self, node: Option<&Value>, theme: &Theme, imgs: &ImageCache, snap: &Snapshot) {
         let Some(n) = node else { return };
-        if let Value::Mapping(m) = n {
-            let has = m.keys().any(|k| k.as_str() != Some("INTERVAL"));
-            if has && !self.warned_custom {
-                log::warn!("CUSTOM sensors (sensors_custom.py plugins) are not supported in this build");
-                self.warned_custom = true;
+        let Value::Mapping(m) = n else { return };
+        for (k, sub) in m {
+            let Some(name) = k.as_str() else { continue };
+            if name == "INTERVAL" {
+                continue;
+            }
+            let Some(r) = snap.custom.iter().find(|r| r.name == name) else {
+                if !self.warned_custom {
+                    // Rate-limit: one warning per unknown name per process.
+                    log::warn!("custom sensor '{name}' is not registered (see sensors/custom.rs)");
+                    self.warned_custom = true;
+                }
+                continue;
+            };
+            let string = r.string.clone();
+            if let Some(t) = child(sub, "TEXT").and_then(TextW::parse) {
+                if let Some(s) = string.as_deref() {
+                    self.text(theme, imgs, &t, s);
+                }
+            }
+            if let Some(numeric) = r.numeric {
+                if numeric.is_nan() {
+                    continue;
+                }
+                if let Some(b) = child(sub, "GRAPH").and_then(BarW::parse) {
+                    let bg = self.bg(imgs, &theme.dir, b.bg_image.as_deref(), b.bg);
+                    mark_rect(&mut self.dirty, draw_bar(&mut self.fb, &b, numeric, &bg));
+                }
+                if let Some(rw) = child(sub, "RADIAL").and_then(RadialW::parse) {
+                    let bg = self.bg(imgs, &theme.dir, rw.bg_image.as_deref(), rw.bg);
+                    let s = string.clone().unwrap_or_default();
+                    mark_rect(
+                        &mut self.dirty,
+                        draw_radial(&mut self.fb, &mut self.fonts, &rw, numeric, &s, &bg),
+                    );
+                }
+            }
+            if let Some(g) = child(sub, "LINE_GRAPH").and_then(GraphW::parse) {
+                if !r.history.is_empty() {
+                    let solid = Bg::Solid([0, 0, 0]);
+                    mark_rect(
+                        &mut self.dirty,
+                        draw_graph(&mut self.fb, &mut self.fonts, &g, &r.history, &solid),
+                    );
+                }
             }
         }
     }

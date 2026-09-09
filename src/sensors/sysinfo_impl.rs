@@ -167,6 +167,8 @@ impl SysinfoCollector {
             wx_description: None,
             wx_humidity: None,
             wx_update: None,
+            // Custom readings are overlaid by `Provider` (stateful bank).
+            custom: Vec::new(),
         }
     }
 

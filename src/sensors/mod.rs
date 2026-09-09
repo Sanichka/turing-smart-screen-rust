@@ -12,6 +12,7 @@
 //! unsupported sensor (matches Python `math.nan`).
 
 pub mod cputemp;
+pub mod custom;
 pub mod date;
 pub mod gpu;
 pub mod pawnio;
@@ -75,6 +76,7 @@ pub struct Snapshot {
     pub wx_description: Option<String>,
     pub wx_humidity: Option<String>,
     pub wx_update: Option<String>,
+    pub custom: Vec<custom::CustomReading>,
 }
 
 impl Snapshot {
@@ -143,6 +145,14 @@ impl Snapshot {
             "wx_description": opt(&self.wx_description),
             "wx_humidity": opt(&self.wx_humidity),
             "wx_update": opt(&self.wx_update),
+            "custom": self.custom.iter().map(|c| {
+                json!({
+                    "name": c.name,
+                    "numeric": c.numeric.filter(|v| !v.is_nan()),
+                    "string": c.string,
+                    "history": c.history.iter().filter(|v| !v.is_nan()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
         })
     }
 }
@@ -193,6 +203,7 @@ pub enum Provider {
     Sysinfo {
         sys: Box<sysinfo_impl::SysinfoCollector>,
         gpu: Box<gpu::GpuCollector>,
+        custom: custom::CustomBank,
     },
     StubStatic,
     StubRandom(stub::XorShift64),
@@ -216,6 +227,7 @@ impl Provider {
                         cpu_fan.to_string(),
                     )),
                     gpu: Box::new(gpu::GpuCollector::detect()),
+                    custom: custom::CustomBank::new(),
                 }
             }
             HwSensors::Stub => Provider::StubRandom(stub::XorShift64::new(10)),
@@ -229,6 +241,7 @@ impl Provider {
                         cpu_fan.to_string(),
                     )),
                     gpu: Box::new(gpu::GpuCollector::detect()),
+                    custom: custom::CustomBank::new(),
                 }
             }
         }
@@ -246,16 +259,25 @@ impl Provider {
     /// to overlay the latest `SlowData`.
     pub fn snapshot_fast(&mut self, nets: &NetSelection) -> Snapshot {
         match self {
-            Provider::Sysinfo { sys, gpu } => {
+            Provider::Sysinfo { sys, gpu, custom } => {
                 let mut snap = sys.snapshot(nets);
                 gpu.fill(&mut snap);
+                snap.custom = custom.read_all();
                 let (iso, epoch) = date::now();
                 snap.date_iso = iso;
                 snap.date_epoch = epoch;
                 snap
             }
-            Provider::StubStatic => stub::static_snapshot(),
-            Provider::StubRandom(rng) => stub::random_snapshot(rng),
+            Provider::StubStatic => {
+                let mut snap = stub::static_snapshot();
+                snap.custom = custom::CustomBank::new().read_all();
+                snap
+            }
+            Provider::StubRandom(rng) => {
+                let mut snap = stub::random_snapshot(rng);
+                snap.custom = custom::CustomBank::new().read_all();
+                snap
+            }
         }
     }
 

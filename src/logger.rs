@@ -1,16 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Minimal stderr logger. Replaces `env_logger` (~regex+jiff, MBs) with ~60
-//! lines: `RUST_LOG` level filter (`off/error/warn/info/debug/trace`,
-//! default `info`), `timestamp [LEVEL] message` lines on stderr.
+//! Minimal stderr + file logger. Replaces `env_logger` (~regex+jiff, MBs)
+//! with ~100 lines: `RUST_LOG` level filter (`off/error/warn/info/debug/trace`,
+//! default `info`), `timestamp [LEVEL] message` lines on stderr and in
+//! `log.log` (1MB cap, truncated on rollover like Python's backupCount=0).
 
 use log::{Level, LevelFilter, Metadata, Record};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+
+/// Python parity: 1MB text log in the working directory.
+const LOG_FILE: &str = "log.log";
+const LOG_CAP: u64 = 1_000_000;
 
 struct Logger {
     level: LevelFilter,
 }
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
+static FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+
+fn log_file() -> Option<&'static Mutex<std::fs::File>> {
+    FILE.get_or_init(|| {
+        Mutex::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(LOG_FILE)
+                .unwrap_or_else(|_| {
+                    // Nowhere to log the failure; fall back to a sink.
+                    #[cfg(unix)]
+                    let sink =
+                        std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+                    #[cfg(windows)]
+                    let sink =
+                        std::fs::OpenOptions::new().write(true).open("NUL").unwrap();
+                    sink
+                }),
+        )
+    });
+    FILE.get()
+}
 
 impl log::Log for Logger {
     fn enabled(&self, meta: &Metadata) -> bool {
@@ -31,7 +59,28 @@ impl log::Log for Logger {
             Level::Debug => "DEBUG",
             Level::Trace => "TRACE",
         };
-        eprintln!("{ts} [{level}] {}", record.args());
+        let line = format!("{ts} [{level}] {}", record.args());
+        eprintln!("{line}");
+        if let Some(f) = log_file() {
+            if let Ok(mut f) = f.lock() {
+                use std::io::Write;
+                let roll = f
+                    .metadata()
+                    .map(|m| m.len() > LOG_CAP)
+                    .unwrap_or(false);
+                if roll {
+                    // Truncate-rollover (backupCount=0 semantics).
+                    if let Ok(trunc) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(LOG_FILE)
+                    {
+                        *f = trunc;
+                    }
+                }
+                let _ = writeln!(f, "{line}");
+            }
+        }
     }
 }
 
