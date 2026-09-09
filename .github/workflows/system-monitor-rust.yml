@@ -30,6 +30,12 @@ jobs:
       with:
         components: clippy
 
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libudev-dev pkg-config
+
     - name: Lint
       # lib + daemon only: the eframe GUI bins need OS GL/windowing dev
       # libraries absent from stock runners (verified on Windows locally).
