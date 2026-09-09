@@ -20,11 +20,69 @@ use crate::sensors::{self, NetSelection, Provider, SlowCtx};
 const TILE_W: u32 = 64;
 const TILE_H: u32 = 32;
 
+/// Ensures a single daemon: a second copy exits instead of fighting over
+/// the COM port (open-fail/reopen storms burn CPU and tear the display).
+/// Windows: named mutex. Elsewhere: advisory lock file next to the log.
+fn single_instance_guard() -> Result<InstanceGuard, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        const ERROR_ALREADY_EXISTS: u32 = 183;
+        let name: Vec<u16> = "TuringSmartScreenDaemon\0".encode_utf16().collect();
+        // SAFETY: plain Win32 call with valid params.
+        let handle: HANDLE = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle == 0 {
+            return Err("cannot create instance mutex".to_string());
+        }
+        // SAFETY: GetLastError immediately after the call.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Err("another daemon instance is already running".to_string());
+        }
+        Ok(InstanceGuard::Windows(handle))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::fs::OpenOptions;
+        // Exclusive create: fails when the lock file already exists.
+        match OpenOptions::new().write(true).create_new(true).open(".tss-daemon.lock") {
+            Ok(f) => Ok(InstanceGuard::File(f)),
+            Err(_) => Err("another daemon instance is already running".to_string()),
+        }
+    }
+}
+
+enum InstanceGuard {
+    #[cfg(target_os = "windows")]
+    Windows(isize),
+    #[cfg(not(target_os = "windows"))]
+    File(std::fs::File),
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        let InstanceGuard::Windows(h) = *self;
+        // SAFETY: we own the handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(h) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(".tss-daemon.lock");
+    }
+}
+
 pub struct DaemonArgs {
     pub com_override: Option<String>,
     pub tick: Duration,
     /// `--send-test`: paint static + one frame, leave the image on screen.
     pub test_once: bool,
+    /// `--no-tray`: skip the tray icon (service/headless use).
+    pub no_tray: bool,
 }
 
 fn display_orientation(t: &Theme) -> Orientation {
@@ -65,6 +123,14 @@ fn send_rect(
 }
 
 pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
+    let _instance = match single_instance_guard() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!("hint: another daemon is already running (check Task Manager / tray icon)");
+            return 2;
+        }
+    };
     let com = args
         .com_override
         .as_deref()
@@ -171,8 +237,14 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
             return 1;
         }
     }
-    // Tray icon (best effort, kept alive until shutdown).
-    let _tray = crate::tray::show(stopping.clone());
+    // Tray icon (best effort, kept alive until shutdown; skipped for
+    // headless/service contexts and with --no-tray).
+    let _tray = if args.no_tray {
+        log::info!("tray icon disabled by --no-tray");
+        None
+    } else {
+        crate::tray::show(stopping.clone())
+    };
     // Simulated display web preview (Python parity: always on in SIMU).
     let simu_web = if cfg.display.revision == crate::config::Revision::Simu {
         display::simuserve::spawn(stopping.clone())

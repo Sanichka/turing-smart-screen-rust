@@ -23,6 +23,7 @@ struct Args {
     daemon: bool,
     send_test: bool,
     theme_screenshots: Option<u32>,
+    no_tray: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -43,6 +44,7 @@ fn parse_args() -> Result<Args, String> {
             "--render-once" => args.render_once = true,
             "--daemon" => args.daemon = true,
             "--send-test" => args.send_test = true,
+            "--no-tray" => args.no_tray = true,
             "--theme-screenshots" => {
                 let v = it
                     .next()
@@ -129,7 +131,7 @@ fn print_help() {    println!(
            turing-smart-screen --dump-config [--config <path>] [--theme <name>]\n  \
            turing-smart-screen --sensors-once [--config <path>]\n  \
            turing-smart-screen --render-once [--config <path>] [--theme <name>]\n  \
-           turing-smart-screen --daemon [--config <path>] [--theme <name>] [--com <port>] [--tick-ms <n>]\n  \
+           turing-smart-screen --daemon [--config <path>] [--theme <name>] [--com <port>] [--tick-ms <n>] [--no-tray]\n  \
            turing-smart-screen --send-test [--config <path>] [--theme <name>] [--com <port>]\n  \
            turing-smart-screen --theme-screenshots <n> [--config <path>] [--theme <name>]\n  \
            turing-smart-screen --help\n\
@@ -139,6 +141,7 @@ fn print_help() {    println!(
          --render-once   render one frame to screencap.png (SIMU parity)\n\
          --daemon        run the monitor loop (Ctrl-C stops, panel blanks)\n\
          --send-test     init display + paint one frame, leave panel on\n\
+         --no-tray       no tray icon (with --daemon; implied without desktop)\n\
          --theme-screenshots <n>  run n headless iterations, save screencap.png (CI/theme previews)"
     );
 }
@@ -225,6 +228,7 @@ pub fn run() {
             com_override: args.com_override,
             tick: std::time::Duration::from_millis(args.tick_ms),
             test_once: args.send_test,
+            no_tray: args.no_tray,
         };
         std::process::exit(daemon::run(&cfg, &theme, &dargs));
     }

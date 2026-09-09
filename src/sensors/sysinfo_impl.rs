@@ -17,6 +17,11 @@ use super::superio::SuperIo;
 /// mirrors `psutil.cpu_percent(interval=...)` blocking semantics).
 const CPU_SAMPLE: Duration = Duration::from_millis(300);
 
+/// SuperIO ISA polling shares the chip with vendor tools (and each poll is
+/// dozens of kernel round-trips): refresh fans at most every N ticks.
+/// Temperature is a single SMN read and stays per-tick.
+const FAN_EVERY_N_TICKS: u64 = 5;
+
 pub struct SysinfoCollector {
     sys: System,
     networks: Networks,
@@ -26,6 +31,8 @@ pub struct SysinfoCollector {
     cpu_fan: String,
     cputemp: CpuTemp,
     superio: Option<SuperIo>,
+    tick: u64,
+    last_fan_pct: f32,
 }
 
 impl SysinfoCollector {
@@ -51,6 +58,8 @@ impl SysinfoCollector {
             // SuperIO probe is silent without the driver; failures fall
             // back to hwmon (Linux) / NaN below.
             superio: SuperIo::detect(),
+            tick: 0,
+            last_fan_pct: f32::NAN,
         }
     }
 
@@ -90,12 +99,26 @@ impl SysinfoCollector {
             });
         // Fan: SuperIO tachometers first (only source on Windows),
         // then Linux hwmon, else NaN (caller disables the widgets).
-        let cpu_fan_percent = self
-            .superio
-            .as_ref()
-            .map(|s| s.cpu_fan_percent(&self.cpu_fan))
-            .filter(|v| !v.is_nan())
-            .unwrap_or_else(|| hwmon_fan_percent(&self.cpu_fan));
+        // Decimated: ISA polling contends with vendor tools and costs
+        // dozens of kernel round-trips per read; fans move slowly.
+        self.tick += 1;
+        if self.tick.is_multiple_of(FAN_EVERY_N_TICKS) || self.last_fan_pct.is_nan() {
+            let t0 = Instant::now();
+            let fresh = self
+                .superio
+                .as_ref()
+                .map(|s| s.cpu_fan_percent(&self.cpu_fan))
+                .filter(|v| !v.is_nan())
+                .unwrap_or_else(|| hwmon_fan_percent(&self.cpu_fan));
+            let dt = t0.elapsed();
+            if dt > Duration::from_millis(50) {
+                log::warn!("fan poll took {dt:?} (ISA contention?)");
+            }
+            if !fresh.is_nan() {
+                self.last_fan_pct = fresh;
+            }
+        }
+        let cpu_fan_percent = self.last_fan_pct;
 
         // -- Memory (mirrors psutil comment: used = total - available) ----
         let mem_total = self.sys.total_memory();

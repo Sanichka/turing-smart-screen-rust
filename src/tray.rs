@@ -43,6 +43,12 @@ fn load_icon(path: &str) -> Option<tray_item::IconSource> {
 /// Show the tray icon. `stopping` is shared with the daemon loop:
 /// Exit (and Configure, like Python) requests shutdown.
 pub fn show(stopping: Arc<AtomicBool>) -> Option<Tray> {
+    if !interactive_desktop() {
+        log::info!("no interactive desktop (service session?); running without tray icon");
+        let _ = stopping;
+        return None;
+    }
+
     #[cfg(not(target_os = "windows"))]
     {
         log::info!("tray icon is not supported on this platform; running headless");
@@ -81,6 +87,43 @@ pub fn show(stopping: Arc<AtomicBool>) -> Option<Tray> {
         log::info!("tray icon shown");
         Some(Tray { _item: item })
     }
+}
+
+/// True when the process can show UI: fails in session 0 / service
+/// contexts where a message pump would spin against a missing desktop.
+/// (tray-item creates a visible-style window; without a compositor its
+/// pump can burn a whole core dispatching junk.)
+#[cfg(target_os = "windows")]
+fn interactive_desktop() -> bool {
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
+    };
+    // SAFETY: plain queries with valid buffers.
+    unsafe {
+        let station = GetProcessWindowStation();
+        if station == 0 {
+            return false;
+        }
+        let mut flags: USEROBJECTFLAGS = std::mem::zeroed();
+        let mut needed = 0u32;
+        if GetUserObjectInformationW(
+            station,
+            UOI_FLAGS,
+            &mut flags as *mut _ as *mut _,
+            std::mem::size_of::<USEROBJECTFLAGS>() as u32,
+            &mut needed,
+        ) == 0
+        {
+            return false;
+        }
+        // WSF_VISIBLE = 0x0001.
+        (flags.dwFlags & 0x0001) != 0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn interactive_desktop() -> bool {
+    true
 }
 
 /// Mirror `main.py:on_configure_tray`: open the configuration tool, then
