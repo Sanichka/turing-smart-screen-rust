@@ -57,6 +57,18 @@ impl FontCache {
     }
 }
 
+/// Pixel scale matching PIL `truetype(size)` semantics (size = EM height).
+/// ab_glyph normalizes by full line height (`height_unscaled`), so the
+/// scale must be inflated by `height/upem` — otherwise JetBrains Mono
+/// (1320 vs 1000) renders at 0.76x, which is exactly the reported bug.
+/// Advance/kerning math stays in `size/upem` space, identical by construction.
+fn px_scale_for(font: &FontArc, size: u32) -> PxScale {
+    let upem = font.units_per_em().unwrap_or(1000.0).max(1.0);
+    let height = font.height_unscaled();
+    let height = if height > 0.0 { height } else { upem };
+    PxScale::from(size as f32 * height / upem)
+}
+
 /// Lay out one line: advance + kerning walk, calling `f` per outlined glyph
 /// with its pixel bounds and coverage source. `origin` is the layout origin
 /// (baseline start); bounds may extend negative of it.
@@ -68,8 +80,8 @@ pub fn layout_line(
     oy: f32,
     mut f: impl FnMut(GlyRect, &OutlinedGlyph),
 ) {
-    let scale = PxScale::from(size as f32);
-    let upem = font.units_per_em().unwrap_or(1000.0);
+    let scale = px_scale_for(font, size);
+    let upem = font.units_per_em().unwrap_or(1000.0).max(1.0);
     let sf = size as f32 / upem;
     let mut caret = 0.0f32;
     let mut prev: Option<ab_glyph::GlyphId> = None;
@@ -230,6 +242,20 @@ pub fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glyph_metrics_probe() {
+        let mut fonts = FontCache::new(PathBuf::from("res/fonts"));
+        let font = fonts.font("jetbrains-mono/JetBrainsMono-Bold.ttf").unwrap();
+        // PIL truetype(size) sizes by EM height: cap height must be
+        // ~cap_ratio * size (JetBrains Mono Bold caps = 730/1000 upm).
+        // Guards the height_unscaled/upem conversion in px_scale_for.
+        let (_, th, _, _) = measure_line(&font, 23, "H").unwrap();
+        assert!(
+            (th as f32 - 0.73 * 23.0).abs() <= 2.0,
+            "cap height {th} at size 23, expected ~17"
+        );
+    }
 
     #[test]
     fn renders_visible_glyphs() {

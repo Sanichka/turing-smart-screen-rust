@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Native configuration GUI (Rust port of `configure.py`).
-//! Step 2 skeleton: theme picker + live STATIC preview + Save.
-//! Full form sections (display/system/weather dialogs) land next.
+//! Native configuration GUI (Rust port of `configure.py`): live STATIC
+//! preview plus the Display and System Monitor sections.
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use turing_smart_screen_rust::config::{
-    load_app_config, load_theme, AppConfig, Revision, Theme,
+    load_app_config, load_theme, AppConfig, HwSensors, Revision, Theme,
 };
 use turing_smart_screen_rust::render::framebuf::rgb565_to_888;
 use turing_smart_screen_rust::render::{ImageCache, Renderer};
@@ -169,6 +168,22 @@ struct ConfigureApp {
     size: String,
     com_port: String,
     com_ports: Vec<String>,
+    hw_sensors: HwSensors,
+    eth: String,
+    wlo: String,
+    net_ifaces: Vec<String>,
+    // Weather & ping dialog state (strings: validated on save).
+    wx_open: bool,
+    ping: String,
+    wx_key: String,
+    wx_lat: String,
+    wx_lon: String,
+    wx_units: String,
+    wx_lang: String,
+    wx_warn: String,
+    city_query: String,
+    city_results: Vec<(String, f64, f64)>,
+    is_admin: bool,
     theme: Theme,
     preview: Option<egui::TextureHandle>,
     preview_size: (f32, f32),
@@ -193,6 +208,141 @@ impl ConfigureApp {
                 Vec::new()
             }
         }
+    }
+
+    /// Interface names for ETH/WLO combos (mirrors psutil.net_if_addrs keys).
+    fn net_ifaces() -> Vec<String> {
+        use sysinfo::Networks;
+        let nets = Networks::new_with_refreshed_list();
+        let mut names: Vec<String> = nets.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(target_os = "windows")]
+    fn is_admin() -> bool {
+        use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
+        // SAFETY: pure query, no side effects.
+        unsafe { IsUserAnAdmin() != 0 }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn is_admin() -> bool {
+        true // gate only applies to Windows LHM use
+    }
+
+    /// (key, label) for WEATHER_UNITS.
+    fn wx_units() -> [(&'static str, &'static str); 3] {
+        [("metric", "metric - °C"), ("imperial", "imperial - °F"), ("standard", "standard - °K")]
+    }
+
+    /// (key, label) for WEATHER_LANGUAGE (ports configure.py's 48-code map).
+    fn wx_langs() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("af", "Afrikaans"), ("al", "Albanian"), ("ar", "Arabic"), ("az", "Azerbaijani"),
+            ("bg", "Bulgarian"), ("ca", "Catalan"), ("cz", "Czech"), ("da", "Danish"),
+            ("de", "German"), ("el", "Greek"), ("en", "English"), ("eu", "Basque"),
+            ("fa", "Persian"), ("fi", "Finnish"), ("fr", "French"), ("gl", "Galician"),
+            ("he", "Hebrew"), ("hi", "Hindi"), ("hr", "Croatian"), ("hu", "Hungarian"),
+            ("id", "Indonesian"), ("it", "Italian"), ("ja", "Japanese"), ("kr", "Korean"),
+            ("la", "Latvian"), ("lt", "Lithuanian"), ("mk", "Macedonian"), ("no", "Norwegian"),
+            ("nl", "Dutch"), ("pl", "Polish"), ("pt", "Portuguese"), ("pt_br", "Portuguese (Brazil)"),
+            ("ro", "Romanian"), ("ru", "Russian"), ("sv", "Swedish"), ("sk", "Slovak"),
+            ("sl", "Slovenian"), ("sp", "Spanish"), ("sr", "Serbian"), ("th", "Thai"),
+            ("tr", "Turkish"), ("ua", "Ukrainian"), ("ug", "Uyghur"), ("uk", "Ukrainian"),
+            ("vi", "Vietnamese"), ("zh_cn", "Chinese (simplified)"), ("zh_tw", "Chinese (traditional)"),
+            ("zu", "Zulu"),
+        ]
+    }
+
+    fn wx_lang_label(key: &str) -> String {
+        Self::wx_langs()
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, l)| l.to_string())
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    /// City search via OWM Geo API (mirrors the dialog's Search button).
+    fn city_search(&mut self) {
+        self.wx_warn.clear();
+        self.city_results.clear();
+        if self.wx_key.trim().is_empty() {
+            self.wx_warn = "enter an API key first".to_string();
+            return;
+        }
+        if self.city_query.trim().is_empty() {
+            self.wx_warn = "enter a city name first".to_string();
+            return;
+        }
+        let url = format!(
+            "http://api.openweathermap.org/geo/1.0/direct?q={}&limit=10&appid={}",
+            self.city_query.trim(),
+            self.wx_key.trim()
+        );
+        let resp = match minreq::get(&url).with_timeout(5).send() {
+            Ok(r) => r,
+            Err(e) => {
+                self.wx_warn = format!("error fetching Geo API: {e}");
+                return;
+            }
+        };
+        if resp.status_code == 401 {
+            self.wx_warn = "invalid API key".to_string();
+            return;
+        }
+        if resp.status_code != 200 {
+            self.wx_warn = format!("Geo API error #{}", resp.status_code);
+            return;
+        }
+        let list: Vec<serde_json::Value> = match resp.json() {
+            Ok(l) => l,
+            Err(e) => {
+                self.wx_warn = format!("error parsing Geo API: {e}");
+                return;
+            }
+        };
+        if list.is_empty() {
+            self.wx_warn = "no given city found".to_string();
+            return;
+        }
+        for c in list {
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let state = c.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let country = c.get("country").and_then(|v| v.as_str()).unwrap_or("");
+            let lat = c.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let lon = c.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            self.city_results.push((
+                format!("{name}, {state} {country} ({lat}, {lon})"),
+                lat,
+                lon,
+            ));
+        }
+    }
+
+    /// Validate + write weather/ping keys. `false` = validation failed.
+    fn save_weather(&mut self) -> bool {
+        let lat: f64 = match self.wx_lat.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.wx_warn = "latitude must be a number".to_string();
+                return false;
+            }
+        };
+        let lon: f64 = match self.wx_lon.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.wx_warn = "longitude must be a number".to_string();
+                return false;
+            }
+        };
+        self.cfg.general.ping = self.ping.trim().to_string();
+        self.cfg.general.weather_api_key = self.wx_key.trim().to_string();
+        self.cfg.general.weather_latitude = lat;
+        self.cfg.general.weather_longitude = lon;
+        self.cfg.general.weather_units = self.wx_units.clone();
+        self.cfg.general.weather_language = self.wx_lang.clone();
+        true
     }
 
     fn load_sized_theme(&self, name: &str) -> Result<Theme, String> {
@@ -233,12 +383,37 @@ impl ConfigureApp {
             size: size.to_string(),
             com_port: String::new(), // set below from config
             com_ports: Self::com_ports(),
+            hw_sensors: HwSensors::Auto, // set below from config
+            eth: String::new(),
+            wlo: String::new(),
+            net_ifaces: Self::net_ifaces(),
+            wx_open: false,
+            ping: String::new(),
+            wx_key: String::new(),
+            wx_lat: String::new(),
+            wx_lon: String::new(),
+            wx_units: "metric".to_string(),
+            wx_lang: "en".to_string(),
+            wx_warn: String::new(),
+            city_query: String::new(),
+            city_results: Vec::new(),
+            is_admin: true,
             theme,
             preview: None,
             preview_size: (0.0, 0.0),
             status: String::new(),
         };
         app.com_port = app.cfg.general.com_port.clone();
+        app.hw_sensors = app.cfg.general.hw_sensors;
+        app.eth = app.cfg.general.eth.clone();
+        app.wlo = app.cfg.general.wlo.clone();
+        app.ping = app.cfg.general.ping.clone();
+        app.wx_key = app.cfg.general.weather_api_key.clone();
+        app.wx_lat = app.cfg.general.weather_latitude.to_string();
+        app.wx_lon = app.cfg.general.weather_longitude.to_string();
+        app.wx_units = app.cfg.general.weather_units.clone();
+        app.wx_lang = app.cfg.general.weather_language.clone();
+        app.is_admin = Self::is_admin();
         // Python parity: reset to first size-compatible theme if needed.
         if !app.compatible_themes().contains(&theme_name) {
             if let Some(first) = app.compatible_themes().into_iter().next() {
@@ -289,10 +464,26 @@ impl ConfigureApp {
         if let Some(config) = v.get_mut("config") {
             config["THEME"] = serde_yaml::Value::String(self.cfg.general.theme.clone());
             config["COM_PORT"] = serde_yaml::Value::String(self.com_port.clone());
+            config["HW_SENSORS"] =
+                serde_yaml::Value::String(self.hw_sensors.as_str().to_string());
+            config["ETH"] = serde_yaml::Value::String(self.eth.clone());
+            config["WLO"] = serde_yaml::Value::String(self.wlo.clone());
+            // Ping/weather staged by the dialog's Save (validated there).
+            config["PING"] = serde_yaml::Value::String(self.cfg.general.ping.clone());
+            config["WEATHER_API_KEY"] =
+                serde_yaml::Value::String(self.cfg.general.weather_api_key.clone());
+            config["WEATHER_LATITUDE"] =
+                serde_yaml::Value::Number(serde_yaml::Number::from(self.cfg.general.weather_latitude));
+            config["WEATHER_LONGITUDE"] =
+                serde_yaml::Value::Number(serde_yaml::Number::from(self.cfg.general.weather_longitude));
+            config["WEATHER_UNITS"] =
+                serde_yaml::Value::String(self.cfg.general.weather_units.clone());
+            config["WEATHER_LANGUAGE"] =
+                serde_yaml::Value::String(self.cfg.general.weather_language.clone());
         }
         if let Some(display) = v.get_mut("display") {
             display["REVISION"] =
-                serde_yaml::Value::String(revision_str(self.cfg.display.revision).to_string());
+                serde_yaml::Value::String(Self::revision_str(self.cfg.display.revision).to_string());
             display["BRIGHTNESS"] =
                 serde_yaml::Value::Number(self.cfg.display.brightness.into());
             display["DISPLAY_REVERSE"] =
@@ -340,7 +531,6 @@ impl ConfigureApp {
         }
         self.refresh_preview(ctx);
     }
-}
 
 fn revision_str(rev: Revision) -> &'static str {
     match rev {
@@ -355,12 +545,150 @@ fn revision_str(rev: Revision) -> &'static str {
     }
 }
 
+    /// Spawn the theme editor for the current theme (falls back to
+    /// opening theme.yaml, mirroring configure.py's Edit theme button).
+    fn edit_theme(&mut self) {
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| {
+                d.join(if cfg!(windows) {
+                    "turing-theme-editor.exe"
+                } else {
+                    "turing-theme-editor"
+                })
+            }))
+            .filter(|p| p.is_file());
+        if let Some(exe) = sibling {
+            match std::process::Command::new(&exe)
+                .arg(&self.cfg.general.theme)
+                .spawn()
+            {
+                Ok(_) => {
+                    self.status = format!("opened theme editor for '{}'", self.cfg.general.theme);
+                    return;
+                }
+                Err(e) => self.status = format!("cannot start {}: {e}", exe.display()),
+            }
+            return;
+        }
+        // No theme-editor binary yet: open the YAML directly.
+        open_path(&Path::new(THEMES_ROOT).join(&self.cfg.general.theme).join("theme.yaml"));
+        self.status = "theme editor not built yet — opened theme.yaml instead".to_string();
+    }
+
+    /// Weather & ping dialog (ports MoreConfigWindow).
+    fn weather_dialog(&mut self, ctx: &egui::Context) {
+        if !self.wx_open {
+            return;
+        }
+        let mut save_close = false;
+        let mut wx_open = true;
+        egui::Window::new("Weather & ping")
+            .open(&mut wx_open)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Hostname/IP to ping");
+                    ui.text_edit_singleline(&mut self.ping);
+                });
+                ui.separator();
+                ui.strong("Weather forecast (OpenWeatherMap API)");
+                ui.horizontal(|ui| {
+                    ui.label("API key");
+                    ui.text_edit_singleline(&mut self.wx_key);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Latitude");
+                    ui.text_edit_singleline(&mut self.wx_lat);
+                    ui.label("Longitude");
+                    ui.text_edit_singleline(&mut self.wx_lon);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Units");
+                    egui::ComboBox::from_id_salt("wxunits")
+                        .selected_text(
+                            Self::wx_units()
+                                .into_iter()
+                                .find(|(k, _)| *k == self.wx_units)
+                                .map(|(_, l)| l)
+                                .unwrap_or(&self.wx_units),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (k, l) in Self::wx_units() {
+                                ui.selectable_value(&mut self.wx_units, k.to_string(), l);
+                            }
+                        });
+                    ui.label("Language");
+                    egui::ComboBox::from_id_salt("wxlang")
+                        .selected_text(Self::wx_lang_label(&self.wx_lang))
+                        .show_ui(ui, |ui| {
+                            for (k, l) in Self::wx_langs() {
+                                ui.selectable_value(&mut self.wx_lang, k.to_string(), l);
+                            }
+                        });
+                });
+                ui.separator();
+                ui.strong("Location search");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.city_query);
+                    if ui.button("Search").clicked() {
+                        self.city_search();
+                    }
+                });
+                if !self.city_results.is_empty() {
+                    let mut picked: Option<(f64, f64)> = None;
+                    egui::ComboBox::from_id_salt("city")
+                        .selected_text("pick a result…")
+                        .show_ui(ui, |ui| {
+                            for (label, lat, lon) in &self.city_results {
+                                if ui.button(label).clicked() {
+                                    picked = Some((*lat, *lon));
+                                }
+                            }
+                        });
+                    if let Some((lat, lon)) = picked {
+                        self.wx_lat = lat.to_string();
+                        self.wx_lon = lon.to_string();
+                    }
+                }
+                if !self.wx_warn.is_empty() {
+                    ui.colored_label(egui::Color32::RED, &self.wx_warn);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() && self.save_weather() {
+                        save_close = true;
+                    }
+                });
+            });
+        if save_close {
+            self.wx_open = false;
+            self.status = "weather & ping settings staged — press Save settings".to_string();
+        } else {
+            self.wx_open = wx_open;
+        }
+    }
+}
+
 fn theme_size_of(themes: &[(String, String)], name: &str) -> String {
     themes
         .iter()
         .find(|(t, _)| t == name)
         .map(|(_, s)| s.clone())
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// Open a file/folder with the OS default handler.
+fn open_path(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(path).spawn();
+    if let Err(e) = r {
+        log::warn!("cannot open {}: {e}", path.display());
+    }
 }
 
 impl eframe::App for ConfigureApp {
@@ -575,38 +903,114 @@ impl eframe::App for ConfigureApp {
                         Err(e) => self.status = format!("cannot load theme: {e}"),
                     }
                 }
-                cols[1].separator();
+                // -- Hardware monitoring + network interfaces --------------
                 cols[1].horizontal(|ui| {
+                    ui.label("Hardware monitoring");
+                    egui::ComboBox::from_id_salt("hw")
+                        .selected_text(self.hw_sensors.label())
+                        .show_ui(ui, |ui| {
+                            let mut opts = vec![
+                                HwSensors::Auto,
+                                HwSensors::Python,
+                                HwSensors::Stub,
+                                HwSensors::Static,
+                            ];
+                            // LHM is Windows-only (mirrors configure.py).
+                            if cfg!(target_os = "windows") {
+                                opts.insert(1, HwSensors::Lhm);
+                            }
+                            for o in opts {
+                                ui.selectable_value(&mut self.hw_sensors, o, o.label());
+                            }
+                        });
+                });
+                // Fake sensors need no interfaces (mirrors configure.py).
+                let nets_on = !matches!(self.hw_sensors, HwSensors::Stub | HwSensors::Static);
+                cols[1].horizontal(|ui| {
+                    ui.label("Ethernet interface");
+                    ui.add_enabled_ui(nets_on, |ui| {
+                        let label =
+                            if self.eth.is_empty() { "None".to_string() } else { self.eth.clone() };
+                        egui::ComboBox::from_id_salt("eth")
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.eth, String::new(), "None");
+                                for n in &self.net_ifaces {
+                                    ui.selectable_value(&mut self.eth, n.clone(), n);
+                                }
+                            });
+                    });
+                });
+                cols[1].horizontal(|ui| {
+                    ui.label("Wi-Fi interface");
+                    ui.add_enabled_ui(nets_on, |ui| {
+                        let label =
+                            if self.wlo.is_empty() { "None".to_string() } else { self.wlo.clone() };
+                        egui::ComboBox::from_id_salt("wlo")
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.wlo, String::new(), "None");
+                                for n in &self.net_ifaces {
+                                    ui.selectable_value(&mut self.wlo, n.clone(), n);
+                                }
+                            });
+                    });
+                });
+                // Admin gate (mirrors configure.py): LHM needs elevation.
+                let needs_admin = matches!(self.hw_sensors, HwSensors::Auto | HwSensors::Lhm)
+                    && cfg!(target_os = "windows")
+                    && !self.is_admin;
+                if needs_admin {
+                    cols[1].colored_label(
+                        egui::Color32::RED,
+                        "Restart as admin, or select another Hardware monitoring",
+                    );
+                }
+                cols[1].separator();
+                cols[1].horizontal_wrapped(|ui| {
+                    if ui.button("Weather & ping").clicked() {
+                        self.wx_open = true;
+                        self.wx_warn.clear();
+                    }
+                    if ui.button("Open themes folder").clicked() {
+                        open_path(Path::new(THEMES_ROOT));
+                    }
+                    if ui.button("Edit theme").clicked() {
+                        self.edit_theme();
+                    }
                     if ui.button("Save settings").clicked() {
                         self.save_all();
                     }
-                    if ui.button("Save and run").clicked() {
-                        self.save_all();
-                        // Prefer the daemon exe next to this tool; fall back
-                        // to PATH lookup (matches tray-launch layouts).
-                        let daemon = std::env::current_exe()
-                            .ok()
-                            .and_then(|p| p.parent().map(|d| {
-                                d.join(if cfg!(windows) {
-                                    "turing-smart-screen.exe"
-                                } else {
-                                    "turing-smart-screen"
-                                })
-                            }))
-                            .filter(|p| p.is_file())
-                            .unwrap_or_else(|| PathBuf::from("turing-smart-screen"));
-                        match std::process::Command::new(&daemon).arg("--daemon").spawn() {
-                            Ok(_) => std::process::exit(0),
-                            Err(e) => {
-                                self.status =
-                                    format!("cannot start {}: {e}", daemon.display())
+                    ui.add_enabled_ui(!needs_admin, |ui| {
+                        if ui.button("Save and run").clicked() {
+                            self.save_all();
+                            // Prefer the daemon exe next to this tool; fall back
+                            // to PATH lookup (matches tray-launch layouts).
+                            let daemon = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(|d| {
+                                    d.join(if cfg!(windows) {
+                                        "turing-smart-screen.exe"
+                                    } else {
+                                        "turing-smart-screen"
+                                    })
+                                }))
+                                .filter(|p| p.is_file())
+                                .unwrap_or_else(|| PathBuf::from("turing-smart-screen"));
+                            match std::process::Command::new(&daemon).arg("--daemon").spawn() {
+                                Ok(_) => std::process::exit(0),
+                                Err(e) => {
+                                    self.status =
+                                        format!("cannot start {}: {e}", daemon.display())
+                                }
                             }
                         }
-                    }
+                    });
                 });
                 if !self.status.is_empty() {
                     cols[1].colored_label(egui::Color32::LIGHT_GREEN, &self.status);
                 }
+                self.weather_dialog(cols[1].ctx());
             });
         });
     }
@@ -614,17 +1018,36 @@ impl eframe::App for ConfigureApp {
 
 fn main() {
     turing_smart_screen_rust::logger::init();
+    turing_smart_screen_rust::cli::ensure_working_dir(&PathBuf::from("config.yaml"));
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Turing System Monitor configuration")
-            .with_inner_size([760.0, 640.0]),
+            .with_inner_size([880.0, 700.0]),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native(
         "turing-configure",
         opts,
         Box::new(|cc| match ConfigureApp::new(cc) {
-            Ok(app) => Ok(Box::new(app)),
+            Ok(app) => {
+                // Python's GUI type runs larger than egui's default: scale
+                // text styles directly (deterministic; eframe may override
+                // pixels_per_point from OS DPI behind our back).
+                cc.egui_ctx.global_style_mut(|style| {
+                    for (ts, size) in [
+                        (egui::TextStyle::Small, 13.0),
+                        (egui::TextStyle::Body, 16.0),
+                        (egui::TextStyle::Monospace, 15.0),
+                        (egui::TextStyle::Button, 16.0),
+                        (egui::TextStyle::Heading, 24.0),
+                    ] {
+                        if let Some(font) = style.text_styles.get_mut(&ts) {
+                            font.size = size;
+                        }
+                    }
+                });
+                Ok(Box::new(app))
+            }
             Err(err) => {
                 eprintln!("error: {err}");
                 std::process::exit(1);

@@ -244,10 +244,11 @@ impl SuperIo {
         }
     }
 
-    /// CPU fan percent. `want` is `"AUTO"` or `"fan<N>"` (1-based, mirrors
-    /// the config.yaml CPU_FAN selector). AUTO = fan #1 when spinning,
-    /// else the first spinning fan; all readings are logged once so a wrong
-    /// guess can be corrected by explicit selection.
+    /// CPU fan percent. `want` is `"AUTO"`, `"fan<N>"` (1-based), or the
+    /// documented `"chip/fan"` form (e.g. `nct6798/fan2`, chip part
+    /// informational only — mirrors the config.yaml CPU_FAN selector).
+    /// AUTO = fan #1 when spinning, else the first spinning fan; all
+    /// readings are logged so a wrong guess can be corrected explicitly.
     pub fn cpu_fan_percent(&self, want: &str) -> f32 {
         let rpms = self.fan_rpms();
         log::debug!(
@@ -255,7 +256,15 @@ impl SuperIo {
             self.chip_name(),
             rpms.iter().map(|r| r.unwrap_or(0)).collect::<Vec<_>>()
         );
-        let pick = if let Some(n) = want.strip_prefix("fan").and_then(|s| s.parse::<usize>().ok()) {
+        // Accept "fan2" and the documented "nct6798/fan2" alike.
+        let selector = want.rsplit('/').next().unwrap_or(want);
+        if selector != "AUTO" && !selector.starts_with("fan") {
+            log::debug!("SuperIO: ignoring unparsable CPU_FAN '{want}', using AUTO");
+        }
+        let pick = if let Some(n) = selector
+            .strip_prefix("fan")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             rpms.get(n.saturating_sub(1)).copied().flatten()
         } else {
             // Fan #1 when spinning, else the first spinning fan.

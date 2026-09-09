@@ -64,6 +64,28 @@ pub enum HwSensors {
     Static,
 }
 
+impl HwSensors {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HwSensors::Auto => "AUTO",
+            HwSensors::Python => "PYTHON",
+            HwSensors::Lhm => "LHM",
+            HwSensors::Stub => "STUB",
+            HwSensors::Static => "STATIC",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            HwSensors::Auto => "Automatic",
+            HwSensors::Python => "Python libraries",
+            HwSensors::Lhm => "LibreHardwareMonitor (admin.)",
+            HwSensors::Stub => "Fake random data",
+            HwSensors::Static => "Fake static data",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DisplayConfig {
     #[serde(rename = "REVISION")]

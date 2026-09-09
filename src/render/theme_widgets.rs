@@ -207,6 +207,7 @@ pub struct TextW {
     pub anchor: String,
     pub show_unit: bool,
     pub format: String,
+    pub min_size: Option<usize>,
 }
 
 impl TextW {
@@ -228,7 +229,14 @@ impl TextW {
             anchor: get_string(v, "ANCHOR", "lt").to_ascii_lowercase(),
             show_unit: get_bool(v, "SHOW_UNIT", true),
             format: get_string(v, "FORMAT", "medium"),
+            min_size: child(v, "MIN_SIZE").and_then(as_i32).map(|n| n.max(0) as usize),
         })
+    }
+
+    /// Effective field width: theme `MIN_SIZE` override or the call default
+    /// (ports `display_themed_value`'s `min_size` handling).
+    pub fn eff_min(&self, def: usize) -> usize {
+        self.min_size.unwrap_or(def)
     }
 }
 
@@ -294,6 +302,7 @@ pub struct RadialW {
     pub bg_bar_color: Rgb,
     pub draw_bg: bool,
     pub decoration: String,
+    pub min_size: Option<usize>,
 }
 
 impl RadialW {
@@ -326,7 +335,12 @@ impl RadialW {
             bg_bar_color: get_rgb(v, "BAR_BACKGROUND_COLOR", [0, 0, 0]),
             draw_bg: get_bool(v, "DRAW_BAR_BACKGROUND", false),
             decoration: get_string(v, "BAR_DECORATION", ""),
+            min_size: child(v, "MIN_SIZE").and_then(as_i32).map(|n| n.max(0) as usize),
         })
+    }
+
+    pub fn eff_min(&self, def: usize) -> usize {
+        self.min_size.unwrap_or(def)
     }
 }
 
@@ -384,35 +398,35 @@ pub fn fmt_value(v: i64, min_size: usize, unit: &str, show_unit: bool) -> String
     s
 }
 
-pub fn fmt_percent(v: f32, show_unit: bool) -> String {
+pub fn fmt_percent(v: f32, show_unit: bool, min_size: usize) -> String {
     if v.is_nan() {
         return String::new();
     }
-    fmt_value(v as i64, 3, "%", show_unit)
+    fmt_value(v as i64, min_size, "%", show_unit)
 }
 
-pub fn fmt_temp(v: f32, show_unit: bool) -> String {
+pub fn fmt_temp(v: f32, show_unit: bool, min_size: usize) -> String {
     if v.is_nan() {
         return String::new();
     }
-    fmt_value(v as i64, 3, "°C", show_unit)
+    fmt_value(v as i64, min_size, "°C", show_unit)
 }
 
-pub fn fmt_freq_ghz(mhz: f32) -> String {
+pub fn fmt_freq_ghz(mhz: f32, min_size: usize) -> String {
     if mhz.is_nan() {
         return String::new();
     }
-    format!("{:>4.2} GHz", mhz / 1000.0)
+    format!("{:>width$.2} GHz", mhz / 1000.0, width = min_size)
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub fn fmt_mega(bytes: u64, show_unit: bool) -> String {
-    fmt_value(bytes as i64 / 1024 / 1024, 5, " M", show_unit)
+pub fn fmt_mega(bytes: u64, show_unit: bool, min_size: usize) -> String {
+    fmt_value(bytes as i64 / 1024 / 1024, min_size, " M", show_unit)
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub fn fmt_giga(bytes: u64, show_unit: bool) -> String {
-    fmt_value(bytes as i64 / 1_000_000_000, 5, " G", show_unit)
+pub fn fmt_giga(bytes: u64, show_unit: bool, min_size: usize) -> String {
+    fmt_value(bytes as i64 / 1_000_000_000, min_size, " G", show_unit)
 }
 
 /// Port of psutil `bytes2human`.
@@ -434,7 +448,8 @@ pub fn bytes2human(n: u64) -> String {
     }
 }
 
-/// Port of `bytes2human(rate, '%(value).1f %(symbol)s/s')`.
+/// Port of `bytes2human(rate, '%(value).1f %(symbol)s/s')` (unpadded;
+/// callers right-align to the widget's effective width, like Python).
 pub fn rate2human(bps: f64) -> String {
     const SYM: &[&str] = &["B", "K", "M", "G", "T"];
     let mut v = bps.max(0.0);
@@ -446,7 +461,7 @@ pub fn rate2human(bps: f64) -> String {
         }
         v /= 1024.0;
     }
-    format!("{v:>10.1}{unit}/s")
+    format!("{v:.1}{unit}/s")
 }
 
 /// Port of `str(timedelta(seconds=...))`.
@@ -570,8 +585,22 @@ mod tests {
     }
 
     #[test]
-    fn named_formats_stable() {
-        let epoch = 1708457333; // 2024-02-20 18:48:53 UTC
+    fn min_size_override() {
+        let v: Value = serde_yaml::from_str(
+            "SHOW: true\nMIN_SIZE: 6\nSHOW_UNIT: false\n",
+        )
+        .unwrap();
+        let t = TextW::parse(&v).unwrap();
+        assert_eq!(t.eff_min(3), 6);
+        assert_eq!(fmt_percent(9.0, false, t.eff_min(3)), "     9");
+        let v2: Value = serde_yaml::from_str("SHOW: true\n").unwrap();
+        let t2 = TextW::parse(&v2).unwrap();
+        assert_eq!(t2.eff_min(3), 3);
+        assert_eq!(fmt_percent(9.0, true, t2.eff_min(3)), "  9%");
+    }
+
+    #[test]
+    fn named_formats_stable() {        let epoch = 1708457333; // 2024-02-20 18:48:53 UTC
         assert!(!fmt_date(epoch, "short").is_empty());
         assert!(fmt_date(epoch, "full").contains("2024"));
         assert!(!fmt_time(epoch, "medium").is_empty());

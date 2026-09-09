@@ -269,7 +269,7 @@ impl Renderer {
             return; // Python disables the widgets with a warning; daemon caches that
         }
         if let Some(t) = child(n, "TEXT").and_then(TextW::parse) {
-            let s = fmt_percent(value, t.show_unit);
+            let s = fmt_percent(value, t.show_unit, t.eff_min(3));
             self.text(theme, imgs, &t, &s);
         }
         if let Some(b) = child(n, "GRAPH").and_then(BarW::parse) {
@@ -279,7 +279,7 @@ impl Renderer {
         }
         if let Some(rw) = child(n, "RADIAL").and_then(RadialW::parse) {
             let s = if rw.show_text {
-                fmt_percent(value, rw.show_unit)
+                fmt_percent(value, rw.show_unit, rw.eff_min(3))
             } else {
                 String::new()
             };
@@ -312,7 +312,7 @@ impl Renderer {
             return;
         }
         if let Some(t) = child(n, "TEXT").and_then(TextW::parse) {
-            let s = fmt_temp(value, t.show_unit);
+            let s = fmt_temp(value, t.show_unit, t.eff_min(3));
             self.text(theme, imgs, &t, &s);
         }
         if let Some(b) = child(n, "GRAPH").and_then(BarW::parse) {
@@ -322,7 +322,7 @@ impl Renderer {
         }
         if let Some(rw) = child(n, "RADIAL").and_then(RadialW::parse) {
             let s = if rw.show_text {
-                fmt_temp(value, rw.show_unit)
+                fmt_temp(value, rw.show_unit, rw.eff_min(3))
             } else {
                 String::new()
             };
@@ -391,7 +391,7 @@ impl Renderer {
                 let size = history_size(p);
                 self.hist("cpu_pct", snap.cpu_percent, size);
                 if let Some(t) = child(p, "TEXT").and_then(TextW::parse) {
-                    self.text(theme, imgs, &t, &fmt_percent(snap.cpu_percent, t.show_unit));
+                    self.text(theme, imgs, &t, &fmt_percent(snap.cpu_percent, t.show_unit, t.eff_min(3)));
                 }
                 if let Some(b) = child(p, "GRAPH").and_then(BarW::parse) {
                     let bg = self.bg(imgs, &theme.dir, b.bg_image.as_deref(), b.bg);
@@ -399,7 +399,7 @@ impl Renderer {
                 }
                 if let Some(rw) = child(p, "RADIAL").and_then(RadialW::parse) {
                     let s = if rw.show_text {
-                        fmt_percent(snap.cpu_percent, rw.show_unit)
+                        fmt_percent(snap.cpu_percent, rw.show_unit, rw.eff_min(3))
                     } else {
                         String::new()
                     };
@@ -423,8 +423,8 @@ impl Renderer {
         // FREQUENCY.
         if let Some(fq) = path(n, &["FREQUENCY"]) {
             if !snap.cpu_freq_mhz.is_nan() {
-                let s = fmt_freq_ghz(snap.cpu_freq_mhz);
                 if let Some(t) = child(fq, "TEXT").and_then(TextW::parse) {
+                    let s = fmt_freq_ghz(snap.cpu_freq_mhz, t.eff_min(4));
                     self.text(theme, imgs, &t, &s);
                 }
                 let ghz = snap.cpu_freq_mhz / 1000.0;
@@ -434,12 +434,13 @@ impl Renderer {
                 }
                 if let Some(rw) = child(fq, "RADIAL").and_then(RadialW::parse) {
                     let bg = self.bg(imgs, &theme.dir, rw.bg_image.as_deref(), rw.bg);
+                    let rs = fmt_freq_ghz(snap.cpu_freq_mhz, rw.eff_min(4));
                             mark_rect(&mut self.dirty, draw_radial(
                         &mut self.fb,
                         &mut self.fonts,
                         &rw,
                         ghz,
-                        &s,
+                        &rs,
                         &bg,
                     ));
                 }
@@ -463,7 +464,7 @@ impl Renderer {
                     continue;
                 }
                 if let Some(t) = path(load, &[key, "TEXT"]).and_then(TextW::parse) {
-                    self.text(theme, imgs, &t, &fmt_percent(v, t.show_unit));
+                    self.text(theme, imgs, &t, &fmt_percent(v, t.show_unit, t.eff_min(3)));
                 }
             }
         }
@@ -483,14 +484,21 @@ impl Renderer {
         );
         // Absolute memory texts (M).
         if !snap.gpu_mem_used_mb.is_nan() {
-            let s = fmt_mega((snap.gpu_mem_used_mb * 1024.0 * 1024.0) as u64, true);
-            self.raw_text(path(n, &["MEMORY_USED", "TEXT"]), theme, imgs, &s);
+            let bytes = (snap.gpu_mem_used_mb * 1024.0 * 1024.0) as u64;
             // Legacy MEMORY.TEXT (deprecated alias, same value).
-            self.raw_text(path(n, &["MEMORY", "TEXT"]), theme, imgs, &s);
+            for keys in [&["MEMORY_USED", "TEXT"] as &[&str], &["MEMORY", "TEXT"]] {
+                if let Some(t) = path(n, keys).and_then(TextW::parse) {
+                    let s = fmt_mega(bytes, t.show_unit, t.eff_min(5));
+                    self.text(theme, imgs, &t, &s);
+                }
+            }
         }
         if !snap.gpu_mem_total_mb.is_nan() {
-            let s = fmt_mega((snap.gpu_mem_total_mb * 1024.0 * 1024.0) as u64, true);
-            self.raw_text(path(n, &["MEMORY_TOTAL", "TEXT"]), theme, imgs, &s);
+            let bytes = (snap.gpu_mem_total_mb * 1024.0 * 1024.0) as u64;
+            if let Some(t) = path(n, &["MEMORY_TOTAL", "TEXT"]).and_then(TextW::parse) {
+                let s = fmt_mega(bytes, t.show_unit, t.eff_min(5));
+                self.text(theme, imgs, &t, &s);
+            }
         }
         // Legacy MEMORY graph/radial (deprecated alias of MEMORY_PERCENT).
         if !snap.gpu_mem_pct.is_nan() {
@@ -501,7 +509,7 @@ impl Renderer {
                 }
                 if let Some(rw) = child(legacy, "RADIAL").and_then(RadialW::parse) {
                     let s = if rw.show_text {
-                        fmt_percent(snap.gpu_mem_pct, rw.show_unit)
+                        fmt_percent(snap.gpu_mem_pct, rw.show_unit, rw.eff_min(3))
                     } else {
                         String::new()
                     };
@@ -524,7 +532,7 @@ impl Renderer {
                 let size = history_size(fps);
                 self.hist("gpu_fps", snap.gpu_fps as f32, size);
                 if let Some(t) = child(fps, "TEXT").and_then(TextW::parse) {
-                    let s = fmt_value(snap.gpu_fps as i64, 4, " FPS", t.show_unit);
+                    let s = fmt_value(snap.gpu_fps as i64, t.eff_min(4), " FPS", t.show_unit);
                     self.text(theme, imgs, &t, &s);
                 }
                 if let Some(b) = child(fps, "GRAPH").and_then(BarW::parse) {
@@ -532,7 +540,7 @@ impl Renderer {
                             mark_rect(&mut self.dirty, draw_bar(&mut self.fb, &b, snap.gpu_fps as f32, &bg));
                 }
                 if let Some(rw) = child(fps, "RADIAL").and_then(RadialW::parse) {
-                    let s = fmt_value(snap.gpu_fps as i64, 4, " FPS", rw.show_unit);
+                    let s = fmt_value(snap.gpu_fps as i64, rw.eff_min(4), " FPS", rw.show_unit);
                     let bg = self.bg(imgs, &theme.dir, rw.bg_image.as_deref(), rw.bg);
                             mark_rect(&mut self.dirty, draw_radial(
                         &mut self.fb,
@@ -554,8 +562,8 @@ impl Renderer {
         // FREQUENCY (GHz text like CPU).
         if let Some(fq) = path(n, &["FREQUENCY"]) {
             if !snap.gpu_freq_mhz.is_nan() {
-                let s = fmt_freq_ghz(snap.gpu_freq_mhz);
                 if let Some(t) = child(fq, "TEXT").and_then(TextW::parse) {
+                    let s = fmt_freq_ghz(snap.gpu_freq_mhz, t.eff_min(4));
                     self.text(theme, imgs, &t, &s);
                 }
                 let ghz = snap.gpu_freq_mhz / 1000.0;
@@ -565,12 +573,13 @@ impl Renderer {
                 }
                 if let Some(rw) = child(fq, "RADIAL").and_then(RadialW::parse) {
                     let bg = self.bg(imgs, &theme.dir, rw.bg_image.as_deref(), rw.bg);
+                    let rs = fmt_freq_ghz(snap.gpu_freq_mhz, rw.eff_min(4));
                             mark_rect(&mut self.dirty, draw_radial(
                         &mut self.fb,
                         &mut self.fonts,
                         &rw,
                         ghz,
-                        &s,
+                        &rs,
                         &bg,
                     ));
                 }
@@ -596,7 +605,7 @@ impl Renderer {
                 }
                 if let Some(rw) = child(swap, "RADIAL").and_then(RadialW::parse) {
                     let s = if rw.show_text {
-                        fmt_percent(snap.mem_swap_percent, rw.show_unit)
+                        fmt_percent(snap.mem_swap_percent, rw.show_unit, rw.eff_min(3))
                     } else {
                         String::new()
                     };
@@ -627,7 +636,7 @@ impl Renderer {
                         theme,
                         imgs,
                         &t,
-                        &fmt_percent(snap.mem_virtual_percent, t.show_unit),
+                        &fmt_percent(snap.mem_virtual_percent, t.show_unit, t.eff_min(3)),
                     );
                 }
                 if let Some(b) = child(virt, "GRAPH").and_then(BarW::parse) {
@@ -636,7 +645,7 @@ impl Renderer {
                 }
                 if let Some(rw) = child(virt, "RADIAL").and_then(RadialW::parse) {
                     let s = if rw.show_text {
-                        fmt_percent(snap.mem_virtual_percent, rw.show_unit)
+                        fmt_percent(snap.mem_virtual_percent, rw.show_unit, rw.eff_min(3))
                     } else {
                         String::new()
                     };
@@ -659,13 +668,13 @@ impl Renderer {
                 }
             }
             if let Some(t) = child(virt, "USED").and_then(TextW::parse) {
-                self.text(theme, imgs, &t, &fmt_mega(snap.mem_used_bytes, t.show_unit));
+                self.text(theme, imgs, &t, &fmt_mega(snap.mem_used_bytes, t.show_unit, t.eff_min(5)));
             }
             if let Some(t) = child(virt, "FREE").and_then(TextW::parse) {
-                self.text(theme, imgs, &t, &fmt_mega(snap.mem_free_bytes, t.show_unit));
+                self.text(theme, imgs, &t, &fmt_mega(snap.mem_free_bytes, t.show_unit, t.eff_min(5)));
             }
             if let Some(t) = child(virt, "TOTAL").and_then(TextW::parse) {
-                self.text(theme, imgs, &t, &fmt_mega(snap.mem_total_bytes, t.show_unit));
+                self.text(theme, imgs, &t, &fmt_mega(snap.mem_total_bytes, t.show_unit, t.eff_min(5)));
             }
         }
     }
@@ -679,7 +688,7 @@ impl Renderer {
                         theme,
                         imgs,
                         &t,
-                        &fmt_percent(snap.disk_usage_percent, t.show_unit),
+                        &fmt_percent(snap.disk_usage_percent, t.show_unit, t.eff_min(3)),
                     );
                 }
                 if let Some(b) = child(used, "GRAPH").and_then(BarW::parse) {
@@ -688,7 +697,7 @@ impl Renderer {
                 }
                 if let Some(rw) = child(used, "RADIAL").and_then(RadialW::parse) {
                     let s = if rw.show_text {
-                        fmt_percent(snap.disk_usage_percent, rw.show_unit)
+                        fmt_percent(snap.disk_usage_percent, rw.show_unit, rw.eff_min(3))
                     } else {
                         String::new()
                     };
@@ -711,14 +720,14 @@ impl Renderer {
                 }
             }
             if let Some(t) = child(used, "TEXT").and_then(TextW::parse) {
-                self.text(theme, imgs, &t, &fmt_giga(snap.disk_used_bytes, t.show_unit));
+                self.text(theme, imgs, &t, &fmt_giga(snap.disk_used_bytes, t.show_unit, t.eff_min(5)));
             }
         }
         if let Some(t) = path(n, &["TOTAL", "TEXT"]).and_then(TextW::parse) {
-            self.text(theme, imgs, &t, &fmt_giga(snap.disk_total_bytes, t.show_unit));
+            self.text(theme, imgs, &t, &fmt_giga(snap.disk_total_bytes, t.show_unit, t.eff_min(5)));
         }
         if let Some(t) = path(n, &["FREE", "TEXT"]).and_then(TextW::parse) {
-            self.text(theme, imgs, &t, &fmt_giga(snap.disk_free_bytes, t.show_unit));
+            self.text(theme, imgs, &t, &fmt_giga(snap.disk_free_bytes, t.show_unit, t.eff_min(5)));
         }
     }
 
@@ -734,7 +743,7 @@ impl Renderer {
             // UPLOAD rate + graph.
             if let Some(up) = child(iface, "UPLOAD") {
                 if let Some(t) = child(up, "TEXT").and_then(TextW::parse) {
-                    let s = format!("{:>10}", rate2human(stats.upload_rate_bps));
+                    let s = format!("{:>width$}", rate2human(stats.upload_rate_bps), width = t.eff_min(10));
                     self.text(theme, imgs, &t, &s);
                 }
                 if let Some(g) = child(up, "LINE_GRAPH").and_then(GraphW::parse) {
@@ -747,12 +756,12 @@ impl Renderer {
                 }
             }
             if let Some(t) = path(iface, &["UPLOADED", "TEXT"]).and_then(TextW::parse) {
-                let s = format!("{:>6}", theme_widgets::bytes2human(stats.uploaded_bytes));
+                let s = format!("{:>width$}", theme_widgets::bytes2human(stats.uploaded_bytes), width = t.eff_min(6));
                 self.text(theme, imgs, &t, &s);
             }
             if let Some(dl) = child(iface, "DOWNLOAD") {
                 if let Some(t) = child(dl, "TEXT").and_then(TextW::parse) {
-                    let s = format!("{:>10}", rate2human(stats.download_rate_bps));
+                    let s = format!("{:>width$}", rate2human(stats.download_rate_bps), width = t.eff_min(10));
                     self.text(theme, imgs, &t, &s);
                 }
                 if let Some(g) = child(dl, "LINE_GRAPH").and_then(GraphW::parse) {
@@ -765,7 +774,7 @@ impl Renderer {
                 }
             }
             if let Some(t) = path(iface, &["DOWNLOADED", "TEXT"]).and_then(TextW::parse) {
-                let s = format!("{:>6}", theme_widgets::bytes2human(stats.downloaded_bytes));
+                let s = format!("{:>width$}", theme_widgets::bytes2human(stats.downloaded_bytes), width = t.eff_min(6));
                 self.text(theme, imgs, &t, &s);
             }
         }
@@ -885,7 +894,7 @@ impl Renderer {
         }
         let v = snap.ping_ms as i64;
         if let Some(t) = child(n, "TEXT").and_then(TextW::parse) {
-            let s = fmt_value(v, 6, "ms", t.show_unit);
+            let s = fmt_value(v, t.eff_min(6), "ms", t.show_unit);
             self.text(theme, imgs, &t, &s);
         }
         if let Some(b) = child(n, "GRAPH").and_then(BarW::parse) {
@@ -893,7 +902,7 @@ impl Renderer {
             mark_rect(&mut self.dirty, draw_bar(&mut self.fb, &b, snap.ping_ms, &bg));
         }
         if let Some(rw) = child(n, "RADIAL").and_then(RadialW::parse) {
-            let s = fmt_value(v, 6, "ms", rw.show_unit);
+            let s = fmt_value(v, rw.eff_min(6), "ms", rw.show_unit);
             let bg = self.bg(imgs, &theme.dir, rw.bg_image.as_deref(), rw.bg);
             mark_rect(&mut self.dirty, draw_radial(
                 &mut self.fb,

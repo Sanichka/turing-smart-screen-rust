@@ -103,8 +103,27 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-fn print_help() {
-    println!(
+/// Installed layouts (Task Scheduler, Start Menu) start with an alien
+/// working directory: if `config.yaml` is not here but ships next to the
+/// exe, chdir there so `res/`, `log.log` and `screencap.png` resolve.
+/// Call before spawning threads. Shared by the daemon and GUI tools.
+pub fn ensure_working_dir(config_path: &PathBuf) {
+    if config_path == &PathBuf::from("config.yaml") && !config_path.is_file() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                if dir.join("config.yaml").is_file() {
+                    if let Err(e) = std::env::set_current_dir(dir) {
+                        eprintln!("error: cannot chdir to {}: {e}", dir.display());
+                        std::process::exit(1);
+                    }
+                    log::debug!("working directory: {}", dir.display());
+                }
+            }
+        }
+    }
+}
+
+fn print_help() {    println!(
         "turing-smart-screen (rust)\n\
          Usage:\n  \
            turing-smart-screen --dump-config [--config <path>] [--theme <name>]\n  \
@@ -145,6 +164,12 @@ pub fn run() {
         eprintln!("pass --dump-config, --sensors-once, --render-once, --daemon, --send-test or --theme-screenshots (see --help).");
         std::process::exit(2);
     }
+
+    // Installed layouts (Task Scheduler, Start Menu) start with an alien
+    // working directory: if the default config.yaml is not here but ships
+    // next to the exe, chdir there so res/, log.log and screencap.png
+    // resolve. Explicit --config paths are honored as given.
+    ensure_working_dir(&args.config_path);
 
     let cfg = match load_app_config(&args.config_path) {
         Ok(c) => c,

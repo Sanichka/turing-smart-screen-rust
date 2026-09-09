@@ -71,15 +71,28 @@ impl RevA {
     }
 
     /// HELLO probe: identifies UsbPCMonitor sub-revisions and sizes.
+    /// A stock Turing 3.5" never answers (read timeout → assumed 320x480,
+    /// no reconnect). Transport errors reopen the port once before falling
+    /// back (mirrors ReadData's retry); a second failure also assumes 3.5".
     fn hello(&mut self) -> Result<(), String> {
         let ping = [Command::Hello as u8; 6];
         self.write_line(&ping)?;
         let mut resp = [0u8; 6];
-        // A stock Turing 3.5" never answers: timeouts are expected there.
-        match self.link.read_exact(&mut resp) {
-            Ok(()) => {}
-            Err(e) => {
-                log::debug!("HELLO unread ({e}); assuming Turing 3.5\"");
+        if let Err(e) = self.link.read_exact(&mut resp) {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                log::debug!("HELLO timeout; assuming Turing 3.5\"");
+                self.width = 320;
+                self.height = 480;
+                self.link.flush_input();
+                return Ok(());
+            }
+            log::debug!("HELLO unread ({e}); reopening once");
+            self.link.close();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            self.link.reopen()?;
+            self.write_line(&ping)?;
+            if self.link.read_exact(&mut resp).is_err() {
+                log::debug!("HELLO still unread; assuming Turing 3.5\"");
                 self.width = 320;
                 self.height = 480;
                 self.link.flush_input();

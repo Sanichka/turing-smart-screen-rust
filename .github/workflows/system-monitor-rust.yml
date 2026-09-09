@@ -1,0 +1,77 @@
+name: System monitor (Rust)
+
+on:
+  push:
+    branches:
+      - main
+      - 'releases/**'
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }}, ${{ matrix.theme }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        theme: ["5inchTheme2", "3.5inchTheme2"]
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Lint
+      # lib + daemon only: the eframe GUI bins need OS GL/windowing dev
+      # libraries absent from stock runners (verified on Windows locally).
+      run: cargo clippy --lib --bin turing-smart-screen -- -D warnings
+
+    - name: Unit tests
+      run: cargo test --lib
+
+    - name: Build daemon
+      # Only the daemon bin: no GUI system libs needed on Linux runners.
+      run: cargo build --bin turing-smart-screen
+
+    - name: Select theme in config.yaml
+      shell: bash
+      run: |
+        echo "Using theme ${{ matrix.theme }}"
+        sed -i.bak -E "s/^  THEME.*$/  THEME: ${{ matrix.theme }}/" config.yaml
+
+    - name: Render headless screenshots
+      shell: bash
+      # No hardware or window needed: exercises sensors + full render path.
+      run: |
+        ./target/debug/turing-smart-screen --theme-screenshots 10 2>&1 | tee output.log
+        test -f screencap.png
+
+    - name: Check output for errors
+      shell: bash
+      run: |
+        echo "######## Output : ########"
+        cat output.log
+        if grep -iE "error|traceback|exception|panicked" output.log; then
+          echo "Program failed to run, see output above"
+          exit 1
+        fi
+
+    - name: Prepare screenshot for archiving
+      shell: bash
+      run: |
+        cp screencap.png screenshot-rs-${{ matrix.os }}-${{ matrix.theme }}.png
+
+    - name: Archive a screenshot
+      uses: actions/upload-artifact@v7
+      with:
+        name: screenshot-rs-${{ matrix.os }}-${{ matrix.theme }}
+        path: screenshot-*.png

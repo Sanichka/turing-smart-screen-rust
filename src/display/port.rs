@@ -90,14 +90,13 @@ impl SerialLink {
             .map_err(|e| format!("serial write failed: {e}"))
     }
 
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), std::io::Error> {
         use std::io::Read;
         let port = self
             .port
             .as_mut()
-            .ok_or_else(|| "serial port not open".to_string())?;
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "serial port not open"))?;
         port.read_exact(buf)
-            .map_err(|e| format!("serial read failed: {e}"))
     }
 
     pub fn flush_input(&mut self) {
