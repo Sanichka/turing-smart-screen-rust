@@ -3,11 +3,12 @@
 //! Ports the `pystray` menu in `main.py`: Configure + Exit.
 //! Failures are non-fatal — the daemon keeps running without a tray.
 
-use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::AtomicBool,
     Arc,
 };
+#[cfg(target_os = "windows")]
+use std::{path::PathBuf, sync::atomic::Ordering};
 
 /// Held for the daemon's lifetime; dropping removes the icon.
 pub struct Tray {
@@ -53,7 +54,7 @@ pub fn show(stopping: Arc<AtomicBool>) -> Option<Tray> {
     {
         log::info!("tray icon is not supported on this platform; running headless");
         let _ = stopping;
-        return None;
+        None
     }
 
     #[cfg(target_os = "windows")]

@@ -14,7 +14,9 @@ const MSR_TEMPERATURE_TARGET: u32 = 0x1A2;
 
 enum Kind {
     Off,
+    #[cfg(target_arch = "x86_64")]
     AmdZen { pawn: PawnIo, tdie_offset: f32 },
+    #[cfg(target_arch = "x86_64")]
     Intel { pawn: PawnIo },
 }
 
@@ -96,6 +98,7 @@ impl CpuTemp {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn load_module(path: &str) -> Option<PawnIo> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -114,6 +117,7 @@ fn load_module(path: &str) -> Option<PawnIo> {
 }
 
 /// k10temp offset table (Tctl→Tdie), millidegrees→Celsius here.
+#[cfg(target_arch = "x86_64")]
 fn amd_offset(_model: u32, brand: &str) -> f32 {
     if brand.contains("1600X") || brand.contains("1700X") || brand.contains("1800X") {
         -20.0
