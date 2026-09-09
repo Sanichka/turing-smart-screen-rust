@@ -1,0 +1,11 @@
+PawnIO kernel-module blobs (AMDFamily17.bin, IntelMSR.bin, LpcIO.bin).
+
+Source: LibreHardwareMonitor repository
+(LibreHardwareMonitorLib/Resources/PawnIo/), Mozilla Public License 2.0,
+Copyright (C) LibreHardwareMonitor and Contributors.
+PawnIO driver itself: https://github.com/namazso/PawnIO
+
+These are executed by the PawnIO kernel driver (installed once via
+external/PawnIO/PawnIO_setup.exe) through our own client
+(src/sensors/pawnio.rs) — no .NET runtime, no sidecar programs.
+Only the modules needed by this machine's CPU are loaded at runtime.

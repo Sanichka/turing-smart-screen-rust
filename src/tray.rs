@@ -3,6 +3,7 @@
 //! Ports the `pystray` menu in `main.py`: Configure + Exit.
 //! Failures are non-fatal — the daemon keeps running without a tray.
 
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -82,20 +83,86 @@ pub fn show(stopping: Arc<AtomicBool>) -> Option<Tray> {
     }
 }
 
-/// Mirror `main.py:on_configure_tray`: best-effort launch of the Python
-/// configure tool, then stop the monitor (it restarts with new settings).
+/// Mirror `main.py:on_configure_tray`: open the configuration tool, then
+/// stop the monitor (its Save&Run starts a fresh daemon with new settings).
+/// Preference: native `turing-configure` next to this exe; fallback to
+/// `configure.py` via python after verifying its imports (a bare `spawn`
+/// succeeds even when the script immediately dies on missing deps).
+/// If nothing usable launches, the monitor keeps running.
 #[cfg(target_os = "windows")]
 fn configure_and_stop(stopping: &Arc<AtomicBool>) {
-    let candidates: [&str; 2] = ["configure.py", "configure.exe"];
+    if launch_native_configure() {
+        stopping.store(true, Ordering::SeqCst);
+        return;
+    }
+    if launch_python_configure() {
+        stopping.store(true, Ordering::SeqCst);
+        return;
+    }
+    log::error!("no configuration tool available (turing-configure.exe not found, python lacks deps); monitor keeps running");
+}
+
+/// Native tool beside the running exe (release/debug dirs, PATH fallback).
+#[cfg(target_os = "windows")]
+fn launch_native_configure() -> bool {
+    let candidates = [
+        sibling_exe("turing-configure"),
+        PathBuf::from("turing-configure.exe"),
+        PathBuf::from("turing-configure"),
+    ];
     for c in candidates {
-        match std::process::Command::new("python")
-            .arg(c)
-            .spawn()
-            .or_else(|_| std::process::Command::new(c).spawn())
-        {
-            Ok(_) => break,
-            Err(e) => log::debug!("cannot launch {c}: {e}"),
+        match std::process::Command::new(&c).spawn() {
+            Ok(_) => {
+                log::info!("launched {}", c.display());
+                return true;
+            }
+            Err(e) => log::debug!("cannot launch {}: {e}", c.display()),
         }
     }
-    stopping.store(true, Ordering::SeqCst);
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn sibling_exe(stem: &str) -> PathBuf {
+    let exe = format!("{stem}.exe");
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(&exe)))
+        .unwrap_or_else(|| PathBuf::from(&exe))
+}
+
+/// Python fallback only if the interpreter can actually import the
+/// configure stack (babel/Pillow/pyserial are the usual missing pieces).
+#[cfg(target_os = "windows")]
+fn launch_python_configure() -> bool {
+    use std::time::Duration;
+    if !PathBuf::from("configure.py").is_file() {
+        log::debug!("configure.py not in working dir");
+        return false;
+    }
+    let check = std::process::Command::new("python")
+        .args(["-c", "import babel,PIL,serial,yaml,psutil"])
+        .output();
+    match check {
+        Ok(o) if o.status.success() => match std::process::Command::new("python")
+            .arg("configure.py")
+            .spawn()
+        {
+            Ok(_) => {
+                log::info!("launched configure.py; stopping monitor");
+                true
+            }
+            Err(e) => {
+                log::debug!("cannot launch configure.py: {e}");
+                false
+            }
+        },
+        _ => {
+            log::debug!("python interpreter missing configure deps");
+            // Brief grace period so a half-working python's stderr (import
+            // errors) is visible in the daemon console before we continue.
+            std::thread::sleep(Duration::from_millis(200));
+            false
+        }
+    }
 }

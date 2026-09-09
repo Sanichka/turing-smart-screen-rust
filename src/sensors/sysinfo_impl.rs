@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, System};
 
 use super::{NetIfStats, NetSelection, Snapshot};
+use super::cputemp::CpuTemp;
+use super::superio::SuperIo;
 
 /// Minimum sample window for CPU usage (sysinfo needs two refreshes;
 /// mirrors `psutil.cpu_percent(interval=...)` blocking semantics).
@@ -22,6 +24,8 @@ pub struct SysinfoCollector {
     components: Components,
     prev_net: HashMap<String, (u64, u64, Instant)>,
     cpu_fan: String,
+    cputemp: CpuTemp,
+    superio: Option<SuperIo>,
 }
 
 impl SysinfoCollector {
@@ -43,6 +47,10 @@ impl SysinfoCollector {
             components: Components::new_with_refreshed_list(),
             prev_net: HashMap::new(),
             cpu_fan,
+            cputemp: CpuTemp::detect(),
+            // SuperIO probe is silent without the driver; failures fall
+            // back to hwmon (Linux) / NaN below.
+            superio: SuperIo::detect(),
         }
     }
 
@@ -71,11 +79,23 @@ impl SysinfoCollector {
             norm_load(load.fifteen),
         );
 
-        let cpu_temp_c = {
-            self.components.refresh();
-            cpu_temperature(&self.components)
-        };
-        let cpu_fan_percent = hwmon_fan_percent(&self.cpu_fan);
+        // PawnIO ring-0 temp first (only source on Windows); Components
+        // covers Linux hwmon, NaN elsewhere.
+        let cpu_temp_c = self
+            .cputemp
+            .read_celsius()
+            .unwrap_or_else(|| {
+                self.components.refresh();
+                cpu_temperature(&self.components)
+            });
+        // Fan: SuperIO tachometers first (only source on Windows),
+        // then Linux hwmon, else NaN (caller disables the widgets).
+        let cpu_fan_percent = self
+            .superio
+            .as_ref()
+            .map(|s| s.cpu_fan_percent(&self.cpu_fan))
+            .filter(|v| !v.is_nan())
+            .unwrap_or_else(|| hwmon_fan_percent(&self.cpu_fan));
 
         // -- Memory (mirrors psutil comment: used = total - available) ----
         let mem_total = self.sys.total_memory();

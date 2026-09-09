@@ -11,12 +11,16 @@
 //! layer. `Snapshot` is scalars + small `String`s; `NaN`/`None` =
 //! unsupported sensor (matches Python `math.nan`).
 
+pub mod cputemp;
 pub mod date;
 pub mod gpu;
+pub mod pawnio;
 pub mod ping;
 pub mod stub;
+pub mod superio;
 pub mod sysinfo_impl;
 pub mod weather;
+pub mod winring0;
 
 use crate::config::{GeneralConfig, HwSensors};
 
@@ -196,14 +200,15 @@ pub enum Provider {
 
 impl Provider {
     /// Build from `HW_SENSORS`. `AUTO` resolves to sysinfo + GPU detect on
-    /// all OS (Windows LHM enrichment is a later step; a warning is logged).
+    /// all OS; on Windows, CPU temperature additionally flows from the
+    /// PawnIO driver when installed and elevated (no CLR hosting, no apps).
     pub fn from_hw(hw: HwSensors, cpu_fan: &str) -> Self {
         match hw {
             HwSensors::Python | HwSensors::Auto => {
                 if hw == HwSensors::Auto && cfg!(target_os = "windows") {
                     log::warn!(
-                        "HW_SENSORS=AUTO on Windows uses sysinfo+NVML for now; \
-                         LibreHardwareMonitor enrichment lands in a later step"
+                        "HW_SENSORS=AUTO on Windows uses sysinfo+NVML; CPU temp additionally needs \
+                         the PawnIO driver installed and this process elevated (run as admin)"
                     );
                 }
                 Provider::Sysinfo {
@@ -217,7 +222,7 @@ impl Provider {
             HwSensors::Static => Provider::StubStatic,
             HwSensors::Lhm => {
                 log::warn!(
-                    "HW_SENSORS=LHM not implemented yet; falling back to sysinfo+NVML"
+                    "HW_SENSORS=LHM is served by the PawnIO path on Windows (no web server needed)"
                 );
                 Provider::Sysinfo {
                     sys: Box::new(sysinfo_impl::SysinfoCollector::with_cpu_fan(
@@ -236,9 +241,9 @@ impl Provider {
         }
     }
 
-    /// Fast path for the daemon render tick: sysinfo + GPU only (no ping,
-    /// date is cheap and included). Slow fields keep caller-supplied values:
-    /// use `apply_slow` to overlay the latest `SlowData`.
+    /// Fast path for the daemon render tick: sysinfo + GPU + PawnIO temp,
+    /// no ping. Slow fields keep caller-supplied values: use `apply_slow`
+    /// to overlay the latest `SlowData`.
     pub fn snapshot_fast(&mut self, nets: &NetSelection) -> Snapshot {
         match self {
             Provider::Sysinfo { sys, gpu } => {

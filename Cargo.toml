@@ -9,6 +9,10 @@ license = "GPL-3.0-or-later"
 name = "turing-smart-screen"
 path = "src/main.rs"
 
+[[bin]]
+name = "turing-configure"
+path = "src/bin/configure.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
@@ -31,7 +35,10 @@ ctrlc = "3.4"
 # Linux backend); other platforms log once and run headless.
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-item = "0.10"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+# glow-only (wgpu-hal is broken on this toolchain); daemon unaffected
+# (eframe links into turing-configure only).
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
 
 [profile.release]
 opt-level = 3
