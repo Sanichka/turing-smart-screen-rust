@@ -1,5 +1,9 @@
 # Security Policy
 
+> [!NOTE]
+> This is a Rust port/fork of [mathoudebine/turing-smart-screen-python](https://github.com/mathoudebine/turing-smart-screen-python).
+> Report vulnerabilities against *this* fork (details below), not upstream.
+
 ## Supported Versions
 
 Only the latest version is supported.

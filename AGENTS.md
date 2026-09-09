@@ -1,5 +1,10 @@
 # AGENTS.md
 
+> Fork note: this repo (`turing-smart-screen-rust`) is a Rust port of
+> [mathoudebine/turing-smart-screen-python](https://github.com/mathoudebine/turing-smart-screen-python).
+> Python files under `library/` are the upstream reference — read them for
+> protocol/behavior questions, but implement in `src/` (Rust).
+
 ## Project Goal
 - Python system monitor for USB-C/TFT displays (Turing, XuanFang, Kipye, WeAct) with 3 usage modes: main app (`main.py`), config tool (`configure.py`), and theme editor (`theme-editor.py`).
 - The design clearly separates **sensor collection**, **theme rendering**, and **hardware driver** so multiple display revisions can be supported without changing business logic.

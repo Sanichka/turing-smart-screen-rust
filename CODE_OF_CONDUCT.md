@@ -1,4 +1,4 @@
-# Code of Conduct - Turing Smart Screen Python project
+# Code of Conduct - Turing Smart Screen Rust project (fork)
 
 ## Our Pledge
 
