@@ -94,3 +94,22 @@ pub fn init() {
     let _ = log::set_logger(logger);
     log::set_max_level(level);
 }
+
+/// Route panics into `log.log` as well: the daemon runs headless under
+/// Task Scheduler, where a bare stderr panic is lost forever. Uses
+/// try_lock: never block a panicking thread on a poisoned mutex.
+pub fn init_panic_hook() {
+    let _ = log_file(); // ensure the file exists before any panic
+    std::panic::set_hook(Box::new(|info| {
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+        let msg = format!("{ts} [PANIC] {info}");
+        eprintln!("{msg}");
+        if let Some(f) = FILE.get() {
+            if let Ok(mut f) = f.try_lock() {
+                use std::io::Write;
+                let _ = writeln!(f, "{msg}");
+                let _ = f.flush();
+            }
+        }
+    }));
+}

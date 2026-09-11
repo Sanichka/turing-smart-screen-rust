@@ -72,6 +72,10 @@ impl DisplayDriver for Simu {
         Ok(())
     }
 
+    fn reconnect(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn set_orientation(&mut self, orientation: Orientation) -> Result<(), String> {
         self.orientation = orientation;
         let (w, h) = self.dims();

@@ -204,6 +204,7 @@ pub enum Provider {
         sys: Box<sysinfo_impl::SysinfoCollector>,
         gpu: Box<gpu::GpuCollector>,
         custom: custom::CustomBank,
+        cpu_fan: String,
     },
     StubStatic,
     StubRandom(stub::XorShift64),
@@ -228,6 +229,7 @@ impl Provider {
                     )),
                     gpu: Box::new(gpu::GpuCollector::detect()),
                     custom: custom::CustomBank::new(),
+                    cpu_fan: cpu_fan.to_string(),
                 }
             }
             HwSensors::Stub => Provider::StubRandom(stub::XorShift64::new(10)),
@@ -242,6 +244,7 @@ impl Provider {
                     )),
                     gpu: Box::new(gpu::GpuCollector::detect()),
                     custom: custom::CustomBank::new(),
+                    cpu_fan: cpu_fan.to_string(),
                 }
             }
         }
@@ -259,7 +262,7 @@ impl Provider {
     /// to overlay the latest `SlowData`.
     pub fn snapshot_fast(&mut self, nets: &NetSelection) -> Snapshot {
         match self {
-            Provider::Sysinfo { sys, gpu, custom } => {
+            Provider::Sysinfo { sys, gpu, custom, .. } => {
                 let mut snap = sys.snapshot(nets);
                 gpu.fill(&mut snap);
                 snap.custom = custom.read_all();
@@ -283,16 +286,33 @@ impl Provider {
 
     /// One-shot snapshot with inline slow sensors (`--sensors-once`).
     pub fn snapshot(&mut self, nets: &NetSelection, slow: &SlowCtx) -> Snapshot {
+        // Borrow the fan selector before the mutable snapshot call.
+        let fan_selector = match self {
+            Provider::Sysinfo { cpu_fan, .. } => Some(cpu_fan.clone()),
+            _ => None,
+        };
         let mut snap = self.snapshot_fast(nets);
         if matches!(self, Provider::Sysinfo { .. }) {
             // Stubs already carry fixed slow values (fixed STUB date etc.).
             apply_slow(&mut snap, &fetch_slow(slow));
+            // Ring-0 readings inline (CLI runs to completion anyway).
+            if let Some(selector) = fan_selector {
+                let (t, f) = read_ring0_once(&selector);
+                if let Some(t) = t {
+                    snap.cpu_temp_c = t;
+                }
+                if let Some(f) = f {
+                    snap.cpu_fan_percent = f;
+                }
+            }
         }
         snap
     }
 }
 
 /// Slow-sensor results, refreshed on a low-frequency thread by the daemon.
+/// Ring-0 temp/fan live here too: a wedged kernel driver must stall only
+/// this thread, never the 1 Hz render loop (post-sleep hangs proved it).
 #[derive(Debug, Clone, Default)]
 pub struct SlowData {
     pub ping_ms: f32,
@@ -301,6 +321,8 @@ pub struct SlowData {
     pub wx_description: Option<String>,
     pub wx_humidity: Option<String>,
     pub wx_update: Option<String>,
+    pub cpu_temp_c: Option<f32>,
+    pub cpu_fan_pct: Option<f32>,
 }
 
 /// Ping + date always; weather only when an API key is configured
@@ -332,4 +354,26 @@ pub fn apply_slow(snap: &mut Snapshot, data: &SlowData) {
     snap.wx_description = data.wx_description.clone();
     snap.wx_humidity = data.wx_humidity.clone();
     snap.wx_update = data.wx_update.clone();
+    // Ring-0 readings overlay sysinfo fallbacks only when present.
+    if let Some(t) = data.cpu_temp_c {
+        if !t.is_nan() {
+            snap.cpu_temp_c = t;
+        }
+    }
+    if let Some(f) = data.cpu_fan_pct {
+        if !f.is_nan() {
+            snap.cpu_fan_percent = f;
+        }
+    }
+}
+
+/// One-shot ring-0 read for CLI paths (`--sensors-once`): temp + fan with
+/// the daemon's selection semantics, no caching.
+pub fn read_ring0_once(cpu_fan: &str) -> (Option<f32>, Option<f32>) {
+    let temp = cputemp::CpuTemp::detect().read_celsius();
+    let fan = superio::SuperIo::detect().map(|s| {
+        let v = s.cpu_fan_percent(cpu_fan);
+        if v.is_nan() { None } else { Some(v) }
+    });
+    (temp, fan.flatten())
 }

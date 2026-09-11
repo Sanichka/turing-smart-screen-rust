@@ -10,29 +10,22 @@ use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, System};
 
 use super::{NetIfStats, NetSelection, Snapshot};
-use super::cputemp::CpuTemp;
-use super::superio::SuperIo;
 
 /// Minimum sample window for CPU usage (sysinfo needs two refreshes;
 /// mirrors `psutil.cpu_percent(interval=...)` blocking semantics).
 const CPU_SAMPLE: Duration = Duration::from_millis(300);
 
-/// SuperIO ISA polling shares the chip with vendor tools (and each poll is
-/// dozens of kernel round-trips): refresh fans at most every N ticks.
-/// Temperature is a single SMN read and stays per-tick.
-const FAN_EVERY_N_TICKS: u64 = 5;
-
 pub struct SysinfoCollector {
     sys: System,
     networks: Networks,
     disks: Disks,
+    // Used by the inline Linux sensor paths; Windows serves these from
+    // the slow thread's ring-0 readers instead.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     components: Components,
     prev_net: HashMap<String, (u64, u64, Instant)>,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     cpu_fan: String,
-    cputemp: CpuTemp,
-    superio: Option<SuperIo>,
-    tick: u64,
-    last_fan_pct: f32,
 }
 
 impl SysinfoCollector {
@@ -54,12 +47,6 @@ impl SysinfoCollector {
             components: Components::new_with_refreshed_list(),
             prev_net: HashMap::new(),
             cpu_fan,
-            cputemp: CpuTemp::detect(),
-            // SuperIO probe is silent without the driver; failures fall
-            // back to hwmon (Linux) / NaN below.
-            superio: SuperIo::detect(),
-            tick: 0,
-            last_fan_pct: f32::NAN,
         }
     }
 
@@ -88,37 +75,22 @@ impl SysinfoCollector {
             norm_load(load.fifteen),
         );
 
-        // PawnIO ring-0 temp first (only source on Windows); Components
-        // covers Linux hwmon, NaN elsewhere.
-        let cpu_temp_c = self
-            .cputemp
-            .read_celsius()
-            .unwrap_or_else(|| {
-                self.components.refresh();
-                cpu_temperature(&self.components)
-            });
-        // Fan: SuperIO tachometers first (only source on Windows),
-        // then Linux hwmon, else NaN (caller disables the widgets).
-        // Decimated: ISA polling contends with vendor tools and costs
-        // dozens of kernel round-trips per read; fans move slowly.
-        self.tick += 1;
-        if self.tick.is_multiple_of(FAN_EVERY_N_TICKS) || self.last_fan_pct.is_nan() {
-            let t0 = Instant::now();
-            let fresh = self
-                .superio
-                .as_ref()
-                .map(|s| s.cpu_fan_percent(&self.cpu_fan))
-                .filter(|v| !v.is_nan())
-                .unwrap_or_else(|| hwmon_fan_percent(&self.cpu_fan));
-            let dt = t0.elapsed();
-            if dt > Duration::from_millis(50) {
-                log::warn!("fan poll took {dt:?} (ISA contention?)");
-            }
-            if !fresh.is_nan() {
-                self.last_fan_pct = fresh;
-            }
-        }
-        let cpu_fan_percent = self.last_fan_pct;
+        // Temperature: sysinfo Components covers Linux hwmon (NaN on
+        // Windows — the slow thread overlays ring-0 readings there, so a
+        // wedged kernel driver stalls that thread, never this 1 Hz loop).
+        #[cfg(not(target_os = "windows"))]
+        let cpu_temp_c = {
+            self.components.refresh();
+            cpu_temperature(&self.components)
+        };
+        #[cfg(target_os = "windows")]
+        let cpu_temp_c = f32::NAN;
+        // Fan: Linux hwmon here; Windows ring-0 readings arrive via the
+        // slow thread for the same hang-isolation reason.
+        #[cfg(not(target_os = "windows"))]
+        let cpu_fan_percent = hwmon_fan_percent(&self.cpu_fan);
+        #[cfg(target_os = "windows")]
+        let cpu_fan_percent = f32::NAN;
 
         // -- Memory (mirrors psutil comment: used = total - available) ----
         let mem_total = self.sys.total_memory();
@@ -249,7 +221,8 @@ fn norm_load(v: f64) -> f32 {
 
 /// CPU temperature with the same priority as `sensors_python.py`:
 /// coretemp (Intel) > k10temp (AMD) > cpu_thermal (ARM) > zenpower.
-/// The caller refreshes the component list in place (no per-poll realloc).
+/// Linux path (Windows serves ring-0 readings from the slow thread).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn cpu_temperature(components: &Components) -> f32 {
     let mut fallback: Option<f32> = None;
     for c in components.list() {
@@ -379,7 +352,9 @@ fn hwmon_fan_percent(want: &str) -> f32 {
     f32::NAN
 }
 
+/// Non-Linux fallback (used on macOS; Windows serves ring-0 from slow thread).
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn hwmon_fan_percent(_want: &str) -> f32 {
     f32::NAN
 }

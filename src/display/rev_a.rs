@@ -133,6 +133,18 @@ impl DisplayDriver for RevA {
         self.link.reopen()
     }
 
+    fn reconnect(&mut self) -> Result<(), String> {
+        // No reboot here (unlike reset): just re-establish a link that
+        // sleep may have torn down, then restore orientation (a reset
+        // panel forgets it). HELLO re-probes sub-model dims.
+        log::info!("reconnecting display link...");
+        self.link.close();
+        self.link.reopen()?;
+        let orientation = self.orientation;
+        self.set_orientation(orientation)?;
+        self.hello()
+    }
+
     fn clear(&mut self) -> Result<(), String> {
         // Hardware quirk: orientation must be PORTRAIT before clearing.
         let back = self.orientation;

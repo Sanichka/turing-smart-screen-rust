@@ -264,11 +264,20 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     let slow_thread = {
         let stopping = stopping.clone();
         let slow_shared = slow_shared.clone();
+        let cpu_fan = cfg.general.cpu_fan.clone();
         std::thread::Builder::new()
             .name("slow-sensors".into())
             .spawn(move || {
+                // Ring-0 readers live HERE, not on the render tick: a wedged
+                // kernel driver (e.g. post-sleep) stalls this thread only,
+                // while the 1 Hz loop keeps painting last-known values.
+                let cputemp = sensors::cputemp::CpuTemp::detect();
+                let superio = sensors::superio::SuperIo::detect();
                 let mut last_ping = Instant::now();
                 let mut last_wx = Instant::now();
+                let mut last_ring = Instant::now()
+                    .checked_sub(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now);
                 // Initial fetch already done; refresh on schedule.
                 while !stopping.load(Ordering::SeqCst) {
                     let now = Instant::now();
@@ -287,6 +296,21 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
                         s.wx_humidity = w.humidity;
                         s.wx_update = w.update;
                     }
+                    if now.duration_since(last_ring).as_secs() >= 5 {
+                        last_ring = now;
+                        let t = cputemp.read_celsius();
+                        let f = superio.as_ref().and_then(|s| {
+                            let v = s.cpu_fan_percent(&cpu_fan);
+                            if v.is_nan() { None } else { Some(v) }
+                        });
+                        let mut s = slow_shared.lock().unwrap();
+                        if t.is_some() {
+                            s.cpu_temp_c = t;
+                        }
+                        if f.is_some() {
+                            s.cpu_fan_pct = f;
+                        }
+                    }
                     std::thread::sleep(Duration::from_millis(250));
                 }
                 log::info!("slow-sensors thread exiting");
@@ -299,7 +323,15 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     // Not joined at shutdown: the message loop has no quit source and the
     // process exit reaps it (same as Python's daemon threads).
     let _power_thread = crate::power::spawn(power_tx);
+    #[cfg(target_os = "windows")]
+    let _power_cb = crate::power::register_callback();
+    #[cfg(not(target_os = "windows"))]
+    let _power_cb: Option<isize> = None;
     let mut force_full = false;
+    // Last successful tick end: a gap far beyond the tick means the machine
+    // slept (or the loop wedged) — recover like a resume (see below).
+    let mut last_tick = Instant::now();
+    let mut tick_n: u64 = 0;
     log::info!("entering render loop ({:?} tick)", args.tick);
     while !stopping.load(Ordering::SeqCst) {
         let t0 = Instant::now();
@@ -324,33 +356,67 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
         if stopping.load(Ordering::SeqCst) {
             break;
         }
-        let mut snap = provider.snapshot_fast(&nets);
-        sensors::apply_slow(&mut snap, &slow_shared.lock().unwrap());
-        renderer.draw_snapshot(theme, &imgs, &snap);
-        renderer.dirty.clear(); // authoritative source is the tile diff
-        let tiles = if force_full {
-            force_full = false;
-            vec![crate::render::framebuf::Rect::new(
-                0,
-                0,
-                renderer.fb.w as i32,
-                renderer.fb.h as i32,
-            )]
-        } else {
-            renderer.fb.changed_tiles(&last_sent, TILE_W, TILE_H)
-        };
-        if !tiles.is_empty() {
-            log::debug!("{} changed tiles", tiles.len());
+        // Backstop for missed broadcasts (session-0 quirks, hibernation):
+        // any silence far beyond the tick is treated as a wake.
+        if t0.duration_since(last_tick) > args.tick * 90 + Duration::from_secs(30) {
+            log::warn!("time gap detected (sleep?): reconnecting serial + full repaint");
+            let _ = tx.send(DisplayOp::Reconnect);
+            let _ = tx.send(DisplayOp::SetBrightness(cfg.display.brightness));
+            let _ = tx.send(DisplayOp::ScreenOn);
+            force_full = true;
         }
-        for t in &tiles {
-            if !send_rect(&tx, t, &renderer.fb) {
-                log::error!("display-io thread died; stopping");
-                stopping.store(true, Ordering::SeqCst);
-                break;
+        last_tick = t0;
+        tick_n += 1;
+        // A panicking tick must not kill the daemon (frozen screen is the
+        // worst outcome): log loudly and skip to the next tick.
+        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut snap = provider.snapshot_fast(&nets);
+            sensors::apply_slow(&mut snap, &slow_shared.lock().unwrap());
+            renderer.draw_snapshot(theme, &imgs, &snap);
+            renderer.dirty.clear(); // authoritative source is the tile diff
+            let tiles = if force_full {
+                force_full = false;
+                vec![crate::render::framebuf::Rect::new(
+                    0,
+                    0,
+                    renderer.fb.w as i32,
+                    renderer.fb.h as i32,
+                )]
+            } else {
+                renderer.fb.changed_tiles(&last_sent, TILE_W, TILE_H)
+            };
+            if !tiles.is_empty() {
+                log::debug!("{} changed tiles", tiles.len());
             }
+            for t in &tiles {
+                if !send_rect(&tx, t, &renderer.fb) {
+                    log::error!("display-io thread died; stopping");
+                    stopping.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            last_sent.copy_from_slice(renderer.fb.pixels());
+            // Liveness marker for post-mortems (survives log rotation).
+            if tick_n.is_multiple_of(60) {
+                let epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_default();
+                let _ = std::fs::write("heartbeat.txt", epoch);
+            }
+        }));
+        if tick.is_err() {
+            log::error!("render tick {tick_n} panicked; skipped (see PANIC entry)");
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
         }
-        last_sent.copy_from_slice(renderer.fb.pixels());
         let elapsed = t0.elapsed();
+        // Stall watchdog: a healthy tick is milliseconds; anything far
+        // beyond the tick interval gets logged with its duration so the
+        // next post-mortem starts with a number, not a mystery.
+        if elapsed > args.tick * 10 + Duration::from_secs(5) {
+            log::warn!("tick {tick_n} took {elapsed:?} (stalled sensor/serial?)");
+        }
         if elapsed < args.tick {
             // Interruptible sleep so Ctrl-C reacts within ~50ms.
             let mut slept = Duration::ZERO;
@@ -371,6 +437,11 @@ pub fn run(cfg: &AppConfig, theme: &Theme, args: &DaemonArgs) -> i32 {
     }
     drop(tx);
     let _ = io.join();
+    #[cfg(target_os = "windows")]
+    if let Some(h) = _power_cb {
+        // SAFETY: handle came from register_callback, unregistered once.
+        unsafe { crate::power::unregister(h) };
+    }
     if let Some(h) = simu_web {
         let _ = h.join();
     }

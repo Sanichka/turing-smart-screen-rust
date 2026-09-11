@@ -40,6 +40,8 @@ pub trait DisplayDriver: Send {
     fn screen_off(&mut self) -> Result<(), String>;
     fn set_brightness(&mut self, level: u8) -> Result<(), String>;
     fn set_orientation(&mut self, orientation: Orientation) -> Result<(), String>;
+    /// Reopen a dead link (post-sleep) and restore orientation.
+    fn reconnect(&mut self) -> Result<(), String>;
     /// Push one RGB565LE region (uncropped `x0..x1`, `y0..y1`).
     fn send_region(
         &mut self,
@@ -80,6 +82,10 @@ pub enum DisplayOp {
     },
     ScreenOff,
     ScreenOn,
+    /// Reopen the port after sleep failure (COM ports often re-enumerate).
+    /// The driver re-applies orientation; brightness is re-sent separately.
+    Reconnect,
+    SetBrightness(u8),
     /// Drain marker: the dispatcher processes all queued regions first,
     /// then turns the panel off and exits. Sending `Stop` on the bounded
     /// channel therefore doubles as the graceful-drain barrier.
@@ -109,6 +115,16 @@ pub fn spawn_dispatcher(
                     DisplayOp::ScreenOn => {
                         if let Err(e) = driver.screen_on() {
                             log::error!("screen_on failed: {e}");
+                        }
+                    }
+                    DisplayOp::Reconnect => {
+                        if let Err(e) = driver.reconnect() {
+                            log::error!("reconnect failed: {e}");
+                        }
+                    }
+                    DisplayOp::SetBrightness(level) => {
+                        if let Err(e) = driver.set_brightness(level) {
+                            log::error!("set_brightness failed: {e}");
                         }
                     }
                     DisplayOp::Stop => {

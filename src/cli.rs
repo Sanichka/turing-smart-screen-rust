@@ -148,6 +148,12 @@ fn print_help() {    println!(
 
 pub fn run() {
     logger::init();
+    logger::init_panic_hook();
+    log::info!(
+        "turing-smart-screen v{} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
 
     let args = match parse_args() {
         Ok(a) => a,
