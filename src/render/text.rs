@@ -179,6 +179,12 @@ pub fn draw_string_rgb(
 ///
 /// `bg_fill` paints the box background (solid or theme-image crop); kept as
 /// a closure so text.rs stays free of image-cache types.
+/// `prev` is the *new* box drawn by the previous call at this origin (cf.
+/// `text_bbox_cache` in lcd_comm.py): the union is repainted so shrinking
+/// text cannot leave stale glyph fragments ("ghosting"). Returns
+/// `(drawn, cache)` where `drawn` is the union blit (mark dirty) and
+/// `cache` is the new box to store for the next call (`None` for fixed
+/// `WIDTH`+`HEIGHT` boxes, which Python never caches, or on failure).
 #[allow(clippy::too_many_arguments)]
 pub fn draw_text(
     fb: &mut Framebuf,
@@ -193,12 +199,19 @@ pub fn draw_text(
     fg: Rgb,
     _align: &str, // single-line themes: alignment is a no-op (noted for Step 5)
     anchor: &str,
+    prev: Option<Rect>,
     bg_fill: impl FnMut(&mut Vec<u8>, u32, u32, i32, i32),
-) -> Option<Rect> {
+) -> (Option<Rect>, Option<Rect>) {
     if text.is_empty() || font_size == 0 {
-        return None;
+        return (None, None);
     }
-    let font = fonts.font(font_name)?;
+    // Python: a WIDTH without HEIGHT means a one-line fixed box.
+    let h = if w > 0 && h == 0 { font_size as i32 } else { h };
+    let fixed = w > 0 && h > 0;
+    let font = match fonts.font(font_name) {
+        Some(f) => f,
+        None => return (None, None),
+    };
     let (tw, th, min_x, min_y) =
         measure_line(&font, font_size, text).unwrap_or((1, font_size, 0, 0));
     let (tw, th) = (tw as i32, th as i32);
@@ -215,28 +228,49 @@ pub fn draw_text(
         (bx, by, tw, th, bx, by)
     };
     if bw <= 0 || bh <= 0 {
-        return None;
+        return (None, None);
+    }
+    // Tight boxes (no fixed WIDTH+HEIGHT) union with the previous *new*
+    // box at this origin; fixed boxes repaint their full box like Python.
+    let cache = if fixed {
+        None
+    } else {
+        Some(Rect::new(bx0, by0, bx0 + bw, by0 + bh))
+    };
+    let (ux0, uy0, ux1, uy1) = match (fixed, prev) {
+        (false, Some(p)) => (
+            bx0.min(p.x0),
+            by0.min(p.y0),
+            (bx0 + bw).max(p.x1),
+            (by0 + bh).max(p.y1),
+        ),
+        _ => (bx0, by0, bx0 + bw, by0 + bh),
+    };
+    let (uw, uh) = (ux1 - ux0, uy1 - uy0);
+    if uw <= 0 || uh <= 0 {
+        return (None, cache);
     }
 
     // Box canvas in RGB8: painted background, glyphs blended on top.
-    // Canvas coordinates are box-local, so the draw origin is relative to
-    // the box: tight-box top-left lands at (ox - bx0, oy - by0).
-    let (bw_u, bh_u) = (bw as u32, bh as u32);
-    let mut canvas = vec![0u8; (bw_u * bh_u * 3) as usize];
+    // Canvas coordinates are union-local; the glyph origin is relative to
+    // the union box so tight-box top-left lands at (ox - ux0, oy - uy0).
+    let (uw_u, uh_u) = (uw as u32, uh as u32);
+    let mut canvas = vec![0u8; (uw_u * uh_u * 3) as usize];
     let mut bg_fill = bg_fill;
-    bg_fill(&mut canvas, bw_u, bh_u, bx0, by0);
+    bg_fill(&mut canvas, uw_u, uh_u, ux0, uy0);
     draw_string_rgb(
         &font,
         font_size,
         text,
         fg,
         &mut canvas,
-        bw_u,
-        bh_u,
-        ox - bx0 - min_x,
-        oy - by0 - min_y,
+        uw_u,
+        uh_u,
+        ox - ux0 - min_x,
+        oy - uy0 - min_y,
     );
-    fb.blit_rgb8(bx0, by0, bw_u, bh_u, &canvas)
+    let drawn = fb.blit_rgb8(ux0, uy0, uw_u, uh_u, &canvas);
+    (drawn, cache)
 }
 
 #[cfg(test)]
@@ -307,15 +341,110 @@ mod tests {
     }
 
     #[test]
+    fn shrinking_text_leaves_no_ghosts() {
+        use super::super::framebuf::Framebuf;
+        let mut fonts = FontCache::new(PathBuf::from("res/fonts"));
+        let mut fb = Framebuf::new(200, 60, [10, 10, 10]);
+        let bg = |buf: &mut Vec<u8>, w: u32, h: u32, ox: i32, oy: i32| {
+            super::super::theme_widgets::paint_canvas(
+                buf, w, h, ox, oy,
+                &super::super::theme_widgets::Bg::Solid([10, 10, 10]),
+            );
+        };
+        let draw = |fb: &mut Framebuf,
+                    fonts: &mut FontCache,
+                    s: &str,
+                    prev: Option<Rect>| {
+            draw_text(
+                fb, fonts, s, 20, 20, 0, 0,
+                "jetbrains-mono/JetBrainsMono-Bold.ttf", 23, [255, 255, 255],
+                "left", "lt", prev, bg,
+            )
+        };
+        let (d1, c1) = draw(&mut fb, &mut fonts, "100%", None);
+        let (d1, c1) = (d1.unwrap(), c1.unwrap());
+        let (d2, _c2) = draw(&mut fb, &mut fonts, "2%", Some(c1));
+        let d2 = d2.unwrap();
+        // Union property: the repaint must cover the old box.
+        assert!(d2.x0 <= c1.x0 && d2.y0 <= c1.y0 && d2.x1 >= c1.x1 && d2.y1 >= c1.y1);
+        assert!(d2.x0 <= d1.x0 && d2.y0 <= d1.y0 && d2.x1 >= d1.x1 && d2.y1 >= d1.y1);
+        // Ink check: every bright pixel must belong to the NEW text's box.
+        // Anchor "lt" draws the tight box at (20, 20).
+        let font = fonts.font("jetbrains-mono/JetBrainsMono-Bold.ttf").unwrap();
+        let (tw, th, _, _) = measure_line(&font, 23, "2%").unwrap();
+        let (tw, th) = (tw as i32, th as i32);
+        let rgb = fb_to_rgb(&fb);
+        for y in 0..60 {
+            for x in 0..200 {
+                let i = (y * 200 + x) * 3;
+                let bright = rgb[i] > 200 && rgb[i + 1] > 200 && rgb[i + 2] > 200;
+                if bright {
+                    let (x, y) = (x as i32, y as i32);
+                    assert!(
+                        x >= 20 && x < 20 + tw && y >= 20 && y < 20 + th,
+                        "ghost pixel at ({x},{y}) outside new text box"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_box_ignores_prev_cache() {
+        use super::super::framebuf::Framebuf;
+        let mut fonts = FontCache::new(PathBuf::from("res/fonts"));
+        let mut fb = Framebuf::new(200, 60, [10, 10, 10]);
+        let bg = |buf: &mut Vec<u8>, w: u32, h: u32, ox: i32, oy: i32| {
+            super::super::theme_widgets::paint_canvas(
+                buf, w, h, ox, oy,
+                &super::super::theme_widgets::Bg::Solid([10, 10, 10]),
+            );
+        };
+        // Fixed WIDTH+HEIGHT boxes repaint their full box (Python parity:
+        // `text_bbox_cache` is only used for tight boxes), so no cache
+        // entry is produced and a stale prev box is ignored.
+        let (d1, c1) = draw_text(
+            &mut fb, &mut fonts, "100%", 20, 20, 120, 30,
+            "jetbrains-mono/JetBrainsMono-Bold.ttf", 23, [255, 255, 255],
+            "left", "lt", None, bg,
+        );
+        assert!(d1.is_some());
+        assert!(c1.is_none(), "fixed boxes must not produce a cache entry");
+        let stale = super::super::framebuf::Rect::new(0, 0, 200, 60);
+        let (d2, c2) = draw_text(
+            &mut fb, &mut fonts, "2%", 20, 20, 120, 30,
+            "jetbrains-mono/JetBrainsMono-Bold.ttf", 23, [255, 255, 255],
+            "left", "lt", Some(stale), bg,
+        );
+        assert!(c2.is_none());
+        let d2 = d2.unwrap();
+        assert_eq!((d2.x0, d2.y0, d2.x1, d2.y1), (20, 20, 140, 50));
+    }
+
+    fn fb_to_rgb(fb: &super::super::framebuf::Framebuf) -> Vec<u8> {
+        use super::super::framebuf::rgb565_to_888;
+        let mut out = Vec::with_capacity(200 * 60 * 3);
+        for y in 0..60 {
+            for x in 0..200 {
+                let [r, g, b] = rgb565_to_888(fb.get(x, y).unwrap());
+                out.push(r);
+                out.push(g);
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    #[test]
     #[ignore]
     fn dump_freq_canvas() {
         use super::super::framebuf::Framebuf;
         let mut fonts = FontCache::new(PathBuf::from("res/fonts"));
         let mut fb = Framebuf::new(480, 800, [132, 154, 165]);
-        let r = draw_text(
+        let (r, _) = draw_text(
             &mut fb, &mut fonts, "2.40 GHz", 300, 100, 0, 0,
             "jetbrains-mono/JetBrainsMono-Bold.ttf", 30, [255, 255, 255],
-            "left", "lt",
+            "left", "lt", None,
             |buf, w, h, ox, oy| {
                 super::super::theme_widgets::paint_canvas(
                     buf, w, h, ox, oy,

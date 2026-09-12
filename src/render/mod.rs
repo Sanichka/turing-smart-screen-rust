@@ -148,6 +148,11 @@ pub struct Renderer {
     scratch: Vec<f32>,
     pub dirty: Vec<Rect>,
     warned_custom: bool,
+    /// Last *new* box per text origin: unioned on the next draw so
+    /// shrinking values cannot leave stale glyph fragments (ports
+    /// `text_bbox_cache` from lcd_comm.py, which stores the new box —
+    /// not the union — and only for tight boxes).
+    text_boxes: HashMap<(i32, i32), Rect>,
 }
 
 impl Renderer {
@@ -159,6 +164,7 @@ impl Renderer {
             scratch: Vec::new(),
             dirty: Vec::new(),
             warned_custom: false,
+            text_boxes: HashMap::new(),
         }
     }
 
@@ -209,7 +215,8 @@ impl Renderer {
         }
         for t in theme.static_texts.values() {
             let bg = self.bg(imgs, &theme.dir, t.background_image.as_deref(), t.background_color);
-            mark_rect(&mut self.dirty, draw_text(
+            let prev = self.text_boxes.get(&(t.x, t.y)).copied();
+            let (drawn, cache) = draw_text(
                 &mut self.fb,
                 &mut self.fonts,
                 &t.text,
@@ -222,10 +229,15 @@ impl Renderer {
                 t.font_color,
                 "left",
                 "lt",
+                prev,
                 |buf, w, h, ox, oy| {
                     theme_widgets::paint_canvas(buf, w, h, ox, oy, &bg);
                 },
-            ));
+            );
+            if let Some(c) = cache {
+                self.text_boxes.insert((t.x, t.y), c);
+            }
+            mark_rect(&mut self.dirty, drawn);
         }
     }
 
@@ -345,7 +357,8 @@ impl Renderer {
             return;
         }
         let bg = self.bg(imgs, &theme.dir, t.bg_image.as_deref(), t.bg);
-        let r = draw_text(
+        let prev = self.text_boxes.get(&(t.x, t.y)).copied();
+        let (drawn, cache) = draw_text(
             &mut self.fb,
             &mut self.fonts,
             s,
@@ -358,11 +371,15 @@ impl Renderer {
             t.fg,
             &t.align,
             &t.anchor,
+            prev,
             |buf, w, h, ox, oy| {
                 theme_widgets::paint_canvas(buf, w, h, ox, oy, &bg);
             },
         );
-        mark_rect(&mut self.dirty, r);
+        if let Some(c) = cache {
+            self.text_boxes.insert((t.x, t.y), c);
+        }
+        mark_rect(&mut self.dirty, drawn);
     }
 
     /// Arbitrary TEXT widget with a preformatted string.
