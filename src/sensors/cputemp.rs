@@ -6,10 +6,14 @@
 //! - Intel: DTS MSR `0x19C` minus TjMax (`0x1A2`), standard.
 //! - Anything else (or no driver): `None`, caller falls back as before.
 
+#[cfg(target_arch = "x86_64")]
 use super::pawnio::PawnIo;
 
+#[cfg(target_arch = "x86_64")]
 const SMN_THM_TCON_CUR_TMP: u32 = 0x0005_9800;
+#[cfg(target_arch = "x86_64")]
 const MSR_THERM_STATUS: u32 = 0x19C;
+#[cfg(target_arch = "x86_64")]
 const MSR_TEMPERATURE_TARGET: u32 = 0x1A2;
 
 enum Kind {
@@ -21,6 +25,7 @@ enum Kind {
 }
 
 pub struct CpuTemp {
+    #[cfg(target_arch = "x86_64")]
     kind: Kind,
 }
 
@@ -28,7 +33,7 @@ impl CpuTemp {
     /// Probe once at startup. Cheap and silent when the driver is absent.
     pub fn detect() -> Self {
         #[cfg(not(target_arch = "x86_64"))]
-        return CpuTemp { kind: Kind::Off };
+        return CpuTemp {};
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -69,30 +74,38 @@ impl CpuTemp {
     }
 
     pub fn read_celsius(&self) -> Option<f32> {
-        match &self.kind {
-            Kind::Off => None,
-            Kind::AmdZen { pawn, tdie_offset } => {
-                let raw = pawn.read_smn(SMN_THM_TCON_CUR_TMP)?;
-                let mut t = ((raw >> 21) * 125) as f32 * 0.001;
-                if (raw & 0x80000) != 0 || (raw & 0x30000) == 0x30000 {
-                    t -= 49.0;
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            None
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            match &self.kind {
+                Kind::Off => None,
+                Kind::AmdZen { pawn, tdie_offset } => {
+                    let raw = pawn.read_smn(SMN_THM_TCON_CUR_TMP)?;
+                    let mut t = ((raw >> 21) * 125) as f32 * 0.001;
+                    if (raw & 0x80000) != 0 || (raw & 0x30000) == 0x30000 {
+                        t -= 49.0;
+                    }
+                    let t = t + tdie_offset;
+                    (t > 0.0 && t < 125.0).then_some(t)
                 }
-                let t = t + tdie_offset;
-                (t > 0.0 && t < 125.0).then_some(t)
-            }
-            Kind::Intel { pawn } => {
-                let status = pawn.read_msr(MSR_THERM_STATUS)? as u32;
-                if status & (1 << 31) == 0 {
-                    return None; // DTS reading invalid
+                Kind::Intel { pawn } => {
+                    let status = pawn.read_msr(MSR_THERM_STATUS)? as u32;
+                    if status & (1 << 31) == 0 {
+                        return None; // DTS reading invalid
+                    }
+                    let tjmax = pawn
+                        .read_msr(MSR_TEMPERATURE_TARGET)
+                        .map(|v| ((v >> 16) & 0xFF) as f32)
+                        .filter(|tj| *tj > 0.0)
+                        .unwrap_or(100.0);
+                    let digital = ((status >> 16) & 0x7F) as f32;
+                    let t = tjmax - digital;
+                    (t > 0.0 && t < 125.0).then_some(t)
                 }
-                let tjmax = pawn
-                    .read_msr(MSR_TEMPERATURE_TARGET)
-                    .map(|v| ((v >> 16) & 0xFF) as f32)
-                    .filter(|tj| *tj > 0.0)
-                    .unwrap_or(100.0);
-                let digital = ((status >> 16) & 0x7F) as f32;
-                let t = tjmax - digital;
-                (t > 0.0 && t < 125.0).then_some(t)
             }
         }
     }
