@@ -9,8 +9,11 @@
 #[cfg(target_arch = "x86_64")]
 use super::pawnio::PawnIo;
 
+#[cfg(target_arch = "x86_64")]
 const SMN_THM_TCON_CUR_TMP: u32 = 0x0005_9800;
+#[cfg(target_arch = "x86_64")]
 const MSR_THERM_STATUS: u32 = 0x19C;
+#[cfg(target_arch = "x86_64")]
 const MSR_TEMPERATURE_TARGET: u32 = 0x1A2;
 
 enum Kind {
@@ -22,6 +25,7 @@ enum Kind {
 }
 
 pub struct CpuTemp {
+    #[cfg(target_arch = "x86_64")]
     kind: Kind,
 }
 
@@ -29,7 +33,7 @@ impl CpuTemp {
     /// Probe once at startup. Cheap and silent when the driver is absent.
     pub fn detect() -> Self {
         #[cfg(not(target_arch = "x86_64"))]
-        return CpuTemp { kind: Kind::Off };
+        return CpuTemp {};
 
         #[cfg(target_arch = "x86_64")]
         {
@@ -72,7 +76,7 @@ impl CpuTemp {
     pub fn read_celsius(&self) -> Option<f32> {
         #[cfg(not(target_arch = "x86_64"))]
         {
-            return None;
+            None
         }
 
         #[cfg(target_arch = "x86_64")]
