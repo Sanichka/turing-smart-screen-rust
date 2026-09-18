@@ -12,6 +12,8 @@
 //! unsupported sensor (matches Python `math.nan`).
 
 pub mod cputemp;
+#[cfg(target_os = "windows")]
+pub mod cpufreq;
 pub mod custom;
 pub mod date;
 pub mod gpu;

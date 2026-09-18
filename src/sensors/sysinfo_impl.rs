@@ -26,6 +26,11 @@ pub struct SysinfoCollector {
     prev_net: HashMap<String, (u64, u64, Instant)>,
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     cpu_fan: String,
+    /// Task Manager style CPU speed probe (Windows PDH). `None` when the
+    /// performance counter is unavailable (some VMs) — snapshot falls back
+    /// down the chain instead.
+    #[cfg(target_os = "windows")]
+    cpu_speed: Option<super::cpufreq::CpuSpeed>,
 }
 
 impl SysinfoCollector {
@@ -40,6 +45,12 @@ impl SysinfoCollector {
         let mut sys = System::new();
         sys.refresh_cpu_all();
         sys.refresh_cpu_usage();
+        #[cfg(target_os = "windows")]
+        let cpu_speed = super::cpufreq::CpuSpeed::new();
+        #[cfg(target_os = "windows")]
+        if cpu_speed.is_none() {
+            log::warn!("PDH % Processor Performance unavailable; CPU GHz falls back to static clock");
+        }
         Self {
             sys,
             networks: Networks::new_with_refreshed_list(),
@@ -47,6 +58,8 @@ impl SysinfoCollector {
             components: Components::new_with_refreshed_list(),
             prev_net: HashMap::new(),
             cpu_fan,
+            #[cfg(target_os = "windows")]
+            cpu_speed,
         }
     }
 
@@ -58,13 +71,20 @@ impl SysinfoCollector {
         self.sys.refresh_cpu_usage();
 
         let cpu_percent = self.sys.global_cpu_usage();
-        let cpu_freq_mhz = self
-            .sys
-            .cpus()
-            .iter()
-            .map(|c| c.frequency())
-            .max()
-            .unwrap_or(0) as f32;
+        // NB: do NOT call refresh_cpu_frequency() here. On Windows it issues
+        // an extra PDH collection ~0ms after the usage pair; the zero-interval
+        // cooked `% Idle Time` fails and sysinfo falls back to 0% idle, which
+        // overwrites the just-sampled usage with 100%. Frequency is refreshed
+        // separately below (live on Windows, sysinfo elsewhere).
+        //
+        // Windows: sysinfo 0.32 reads per-CPU frequency exactly once per
+        // process (`got_cpu_frequency` gate), freezing the display at the
+        // base clock, so prefer the Task Manager style probe
+        // (base × % Processor Performance), then the live CurrentMhz.
+        #[cfg(target_os = "windows")]
+        let cpu_freq_mhz = self.cpu_freq_mhz_windows();
+        #[cfg(not(target_os = "windows"))]
+        let cpu_freq_mhz = sysinfo_cpu_freq(&self.sys);
 
         let load = System::load_average();
         // sysinfo returns 0.0 on platforms without loadavg (Windows):
@@ -167,6 +187,22 @@ impl SysinfoCollector {
         }
     }
 
+    /// Windows frequency fallback chain: Task Manager style probe, then live
+    /// CurrentMhz, then sysinfo's cached value. Never NaN on Windows (the
+    /// screen would blank the widget instead).
+    #[cfg(target_os = "windows")]
+    fn cpu_freq_mhz_windows(&mut self) -> f32 {
+        if let Some(mhz) = self.cpu_speed.as_mut().and_then(|s| s.poll_mhz()) {
+            log::debug!("cpu freq (processor performance): {mhz} MHz");
+            return mhz;
+        }
+        if let Some(mhz) = super::cpufreq::live_cpu_freq_mhz() {
+            log::debug!("cpu freq (current, unwarmed PDH): {mhz} MHz");
+            return mhz;
+        }
+        sysinfo_cpu_freq(&self.sys)
+    }
+
     fn net_stats(&mut self, if_name: &str, now: Instant) -> NetIfStats {
         if if_name.is_empty() {
             return NetIfStats::default();
@@ -217,6 +253,11 @@ fn norm_load(v: f64) -> f32 {
     } else {
         v as f32
     }
+}
+
+/// sysinfo's cached per-CPU frequency (max across cores, MHz).
+fn sysinfo_cpu_freq(sys: &System) -> f32 {
+    sys.cpus().iter().map(|c| c.frequency()).max().unwrap_or(0) as f32
 }
 
 /// CPU temperature with the same priority as `sensors_python.py`:
